@@ -1,0 +1,60 @@
+name: Update data and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "7,37 * * * *"   # every 30 minutes (offset from :00 to avoid GitHub's busiest minute)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test decoder and data job
+        run: npm test
+
+      - name: Pull METAR/TAF and resolve map layers
+        run: |
+          export PAGES_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          node scripts/build-data.mjs
+
+      - name: Feed status summary
+        if: always()
+        run: |
+          node -e '
+            const s = require("./site/data/status.json");
+            const rows = [];
+            for (const [g, o] of Object.entries({Sources: s.sources, Layers: s.layers, Models: s.models}))
+              for (const [k, v] of Object.entries(o))
+                rows.push(`| ${g} | ${k} | ${v.ok ? "OK" : "**CHECK**"} | ${v.name || v.id || v.count || ""} | ${v.error || v.warning || v.note || ""} |`);
+            console.log(["## Feed status", "", "| Group | Item | Status | Detail | Note |", "|---|---|---|---|---|", ...rows].join("\n"));
+          ' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

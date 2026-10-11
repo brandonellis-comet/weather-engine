@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Weather Engine</title>
+  <meta name="description" content="Personal weather map: ECCC-first open data, model comparison, METAR/TAF decoding.">
+  <meta name="theme-color" content="#0e151c">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="railToggle" aria-controls="rail" aria-expanded="false" title="Layers">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 8l10 5 10-5-10-5Zm-8.4 9L2 12.8 12 18l10-5.2-1.6-.8L12 16.4 3.6 12Zm0 4L2 16.8 12 22l10-5.2-1.6-.8L12 20.4 3.6 16Z"/></svg>
+        <span class="sr-only">Layers</span>
+      </button>
+      <div class="brand">
+        <span class="brand-name">Weather Engine</span>
+        <span class="brand-sub">ECCC first · open data</span>
+      </div>
+      <form class="search" id="searchForm" role="search" autocomplete="off">
+        <label class="sr-only" for="searchInput">Search a place or ICAO station</label>
+        <input id="searchInput" type="search" placeholder="Place or ICAO (CYHZ)" spellcheck="false">
+        <ul class="search-results" id="searchResults" hidden></ul>
+      </form>
+      <div class="top-actions">
+        <button class="icon-btn" id="locateBtn" title="My location">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 3h-2.07A7 7 0 0 0 13 5.07V3h-2v2.07A7 7 0 0 0 5.07 11H3v2h2.07A7 7 0 0 0 11 18.93V21h2v-2.07A7 7 0 0 0 18.93 13H21v-2Zm-9 6a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z"/></svg>
+          <span class="sr-only">My location</span>
+        </button>
+        <button class="text-btn" id="statusBtn"><span class="dot" id="statusDot"></span>Feeds</button>
+        <button class="text-btn" id="aboutBtn">About</button>
+      </div>
+    </header>
+
+    <aside class="rail" id="rail" aria-label="Map layers">
+      <section>
+        <h2 class="rail-h">Main layer</h2>
+        <div class="layer-list" id="mainList" role="radiogroup" aria-label="Main layer"></div>
+      </section>
+      <section>
+        <h2 class="rail-h">Overlays</h2>
+        <div class="layer-list" id="overlayList"></div>
+      </section>
+      <section>
+        <h2 class="rail-h">Base map</h2>
+        <div class="seg" role="radiogroup" aria-label="Base map">
+          <button type="button" data-base="osm" aria-pressed="true">Streets</button>
+          <button type="button" data-base="relief" aria-pressed="false">Relief</button>
+        </div>
+      </section>
+      <p class="rail-foot">Tap the map for a point forecast. Tap a station dot for its METAR and TAF.</p>
+    </aside>
+
+    <main class="map-wrap">
+      <div id="map" aria-label="Weather map"></div>
+      <div class="legend" id="legend" hidden></div>
+      <aside class="drawer" id="drawer" hidden aria-label="Details">
+        <header class="drawer-head">
+          <div>
+            <h2 id="drawerTitle">Point</h2>
+            <p id="drawerSub" class="muted"></p>
+          </div>
+          <button class="icon-btn" id="drawerClose" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg><span class="sr-only">Close</span></button>
+        </header>
+        <div class="drawer-body" id="drawerBody"></div>
+      </aside>
+    </main>
+
+    <section class="timebar" aria-label="Time">
+      <div class="time-row">
+        <div class="time-controls">
+          <button class="icon-btn" id="stepBack" title="Step back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg><span class="sr-only">Step back</span></button>
+          <button class="icon-btn play" id="playBtn" title="Play" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" class="i-play"><path d="M8 5v14l11-7z"/></svg><svg viewBox="0 0 24 24" aria-hidden="true" class="i-pause"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg><span class="sr-only">Play</span></button>
+          <button class="icon-btn" id="stepFwd" title="Step forward"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg><span class="sr-only">Step forward</span></button>
+        </div>
+        <div class="time-readout">
+          <output id="timeLocal" class="time-local"></output>
+          <output id="timeZulu" class="time-zulu"></output>
+        </div>
+        <div class="jumps" id="jumps">
+          <button type="button" data-jump="-180">−3h</button>
+          <button type="button" data-jump="0" class="now">Now</button>
+          <button type="button" data-jump="360">+6h</button>
+          <button type="button" data-jump="720">+12h</button>
+          <button type="button" data-jump="1440">+24h</button>
+          <button type="button" data-jump="2880">+48h</button>
+          <button type="button" data-jump="4320">+3d</button>
+          <button type="button" data-jump="7200">+5d</button>
+        </div>
+      </div>
+      <div class="slider-row">
+        <label class="sr-only" for="timeSlider">Map time</label>
+        <input type="range" id="timeSlider" min="0" max="1000" step="1" value="120">
+        <div class="ticks" id="ticks" aria-hidden="true"></div>
+      </div>
+      <div class="chips" id="chips" aria-live="polite"></div>
+    </section>
+
+  </div>
+
+  <dialog id="statusDlg" class="dlg" aria-labelledby="statusTitle">
+    <header><h2 id="statusTitle">Feed status</h2><button class="icon-btn" data-close title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg><span class="sr-only">Close</span></button></header>
+    <div id="statusBody"></div>
+  </dialog>
+
+  <dialog id="aboutDlg" class="dlg" aria-labelledby="aboutTitle">
+    <header><h2 id="aboutTitle">About this map</h2><button class="icon-btn" data-close title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg><span class="sr-only">Close</span></button></header>
+    <div class="prose">
+      <p><strong>Personal tool, not an official forecast or warning service.</strong> For official watches and warnings use <a href="https://weather.gc.ca" target="_blank" rel="noopener">weather.gc.ca</a>. For flight planning use NAV CANADA.</p>
+      <h3>Source rules</h3>
+      <ol>
+        <li>Publicly accessible sources only. No restricted networks or logins.</li>
+        <li>Every source has a published reuse licence.</li>
+        <li>No DND/CAF METOC products.</li>
+        <li>ECCC first. Other agencies fill gaps or serve for comparison.</li>
+        <li>ECCC warnings are shown as ECCC publishes them, unaltered.</li>
+      </ol>
+      <h3>Sources and licences</h3>
+      <ul class="src-list">
+        <li><strong>Environment and Climate Change Canada (MSC GeoMet)</strong>: models (GDPS, GDWPS, GIOPS, RAQDPS), radar, lightning, satellite, warnings. Contains information licenced under the <a href="https://eccc-msc.github.io/open-data/licence/readme_en/" target="_blank" rel="noopener">Data Server End-use Licence</a> of Environment and Climate Change Canada. No endorsement by ECCC is implied.</li>
+        <li><strong>Open-Meteo</strong>: point forecasts from GEM (ECCC), ECMWF IFS and GFS (NOAA). Weather data by <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo.com</a>, CC BY 4.0. Free tier, non-commercial use.</li>
+        <li><strong>NOAA Aviation Weather Center</strong>: METAR and TAF, worldwide. US Government public data.</li>
+        <li><strong>NASA GIBS</strong>: global satellite imagery, sea surface temperature, satellite rain estimate, Blue Marble relief.</li>
+        <li><strong>OpenStreetMap</strong>: street base map. © OpenStreetMap contributors, ODbL.</li>
+      </ul>
+      <h3>How it stays current</h3>
+      <p>A scheduled job runs every 30 minutes. It pulls METAR/TAF, looks up the current ECCC and NASA layer names and times, checks every feed, and republishes this site. The <em>Feeds</em> button shows the last check.</p>
+    </div>
+  </dialog>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "weather-engine",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs", "data": "node scripts/build-data.mjs" }
+}
