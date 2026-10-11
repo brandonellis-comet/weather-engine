@@ -86,7 +86,12 @@ function resolveTime(def, e, t) {
   const ext = e?.time ? parseExtent(e.time.extent) : null;
   if (kind === 'obs') {
     if (t > S.now + 5 * MIN) return { show: false, label: 'observations only' };
-    if (t >= S.now - 5 * MIN || !ext) return { show: true, param: null, label: ext ? 'latest' : 'latest (no time sync)' };
+    if (t >= S.now - 5 * MIN || !ext) {
+      if (!ext) return { show: true, param: null, label: 'latest (no time sync)' };
+      const old = S.now - ext.end > 20 * 3600e3;
+      const when = old ? `${new Date(ext.end).toISOString().slice(5, 10)} ${fmtZ(ext.end)}` : fmtZ(ext.end);
+      return { show: true, param: null, label: `latest ${when}`, warn: old };
+    }
     const s = snapTime(ext, t, 'floor');
     if (s == null) return { show: false, label: 'no data this far back' };
     return { show: true, param: isoForWms(s, ext.dateOnly), label: fmtZ(s), ms: s };

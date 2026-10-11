@@ -187,10 +187,19 @@ export function resolveLayer(def, caps) {
     if (m.all && !m.all.every((p) => rx(p).test(hay))) return false;
     if (m.any && !m.any.some((p) => rx(p).test(hay))) return false;
     if (m.not && m.not.some((p) => rx(p).test(hay))) return false;
+    if (m.notName && m.notName.some((p) => rx(p).test(l.name))) return false;
     return true;
   });
   hits.sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name));
   return hits.length ? [hits[0]] : null;
+}
+
+// For layers that did not resolve (or fell back), list what the source does have,
+// so the next fix is a one-line edit to layers.json.
+function nearMatches(def, caps) {
+  if (!caps || !def.match?.name) return undefined;
+  const rx = new RegExp(def.match.name, 'i');
+  return caps.filter((l) => rx.test(l.name)).slice(0, 40).map((l) => `${l.name} | ${l.title}`);
 }
 
 function entryFor(def, sourceId, layers) {
@@ -230,7 +239,7 @@ async function buildCatalog(config) {
     }
     if (!found) {
       const unknown = caps[def.source] == null;
-      status.layers[def.id] = { ok: false, error: unknown ? 'source catalogue unavailable' : 'no matching layer in source catalogue' };
+      status.layers[def.id] = { ok: false, error: unknown ? 'source catalogue unavailable' : 'no matching layer in source catalogue', seen: nearMatches(def, caps[def.source]) };
       // Keep the previous resolution if we could not check this run.
       if (unknown) catalog.layers[def.id] = null;
       continue;
@@ -242,7 +251,7 @@ async function buildCatalog(config) {
     const ageMin = e.latest ? Math.round((Date.now() - Date.parse(e.latest)) / 60000) : null;
     const kind = e.kind || def.kind;
     const stale = kind === 'obs' && ageMin != null && ageMin > (def.maxAgeMin || 90);
-    status.layers[def.id] = { ok: !stale, name: e.names.join(','), latest: e.latest, reference: e.reference, ...(stale ? { warning: `latest image is ${ageMin} min old` } : {}), ...(note ? { note } : {}) };
+    status.layers[def.id] = { ok: !stale, name: e.names.join(','), latest: e.latest, reference: e.reference, ...(stale ? { warning: `latest image is ${ageMin} min old` } : {}), ...(note ? { note, seen: nearMatches(def, caps[def.source]) } : {}) };
   }
   // Layers we could not check this run: carry the last published resolution.
   const missing = Object.entries(catalog.layers).filter(([, v]) => v === null).map(([k]) => k);
