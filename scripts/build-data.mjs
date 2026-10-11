@@ -284,30 +284,50 @@ async function checkModels(config, catalog) {
 }
 
 // ---------- temporary: wind data probe (diagnostics for the wind animation) ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function wcs(id, extra = '') {
+  const url = `https://geo.weather.gc.ca/geomet?service=WCS&version=2.0.1&request=GetCoverage&CoverageId=${encodeURIComponent(id)}&format=image/tiff&subsettingcrs=EPSG:4326&outputcrs=EPSG:4326&subset=x(-180,180)&subset=y(-90,90)&resolution=x(1)&resolution=y(1)${extra}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(90000) });
+    const b = Buffer.from(await r.arrayBuffer());
+    if (r.status === 429) { await sleep(12000); continue; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${b.slice(0, 160).toString('latin1')}`);
+    return b;
+  }
+  throw new Error('HTTP 429 three times');
+}
 async function windProbe() {
   if (FIX) return;
-  const diag = {};
+  const { readTiff } = await import('./tiff.mjs');
   const g = CAPS.geomet || [];
-  const wind = g.filter((l) => /^GDPS/i.test(l.name) && /wind|_UU|_VV|_WD|_UV/i.test(`${l.name} ${l.title}`));
-  diag.windLayers = wind.slice(0, 60).map((l) => `${l.name} | ${l.title} | styles:${l.styles.slice(0, 4).join(',')} | time:${l.dims.time ? l.dims.time.value.slice(0, 60) : ''}`);
-  const ids = wind.map((l) => l.name).filter((n) => /10m|ETA_UU|ETA_VV|ETA_WD|_UU$|_VV$/i.test(n)).slice(0, 6);
-  diag.wcs = [];
-  const base = 'https://geo.weather.gc.ca/geomet?service=WCS&version=2.0.1';
-  if (ids[0]) {
+  const notes = [];
+  const pick = (re) => g.find((l) => re.test(l.name));
+  const spd = pick(/^GDPS_15km_WindSpeed_10m$/), dir = pick(/^GDPS_15km_WindDir_10m$/), vec = pick(/^GDPS_15km_Winds_10m$/);
+  notes.push(`layers: speed=${spd?.name || '-'} dir=${dir?.name || '-'} vector=${vec?.name || '-'}`);
+  notes.push(`speed time=${spd?.dims.time?.value.slice(0, 70)} default=${spd?.dims.time?.default}`);
+  notes.push(`speed title=${spd?.title?.slice(0, 90)}`);
+  const stats = (a, nd) => { let n = 0, s = 0, mn = Infinity, mx = -Infinity, bad = 0; for (const v of a) { if (!Number.isFinite(v) || v === nd || Math.abs(v) > 1e6) { bad++; continue; } n++; s += v; if (v < mn) mn = v; if (v > mx) mx = v; } return `n=${n} bad=${bad} min=${mn.toFixed(2)} max=${mx.toFixed(2)} mean=${(s / n).toFixed(2)}`; };
+  for (const [label, l, extra] of [['speed', spd, ''], ['dir', dir, ''], ['vector', vec, '']]) {
+    if (!l) continue;
     try {
-      const r = await fetch(`${base}&request=DescribeCoverage&CoverageId=${encodeURIComponent(ids[0])}`, { headers: { 'User-Agent': UA } });
-      diag.describe = (await r.text()).replace(/\s+/g, ' ').slice(0, 3000);
-    } catch (e) { diag.describe = String(e); }
+      const t = readTiff(await wcs(l.name, extra));
+      notes.push(`${label}: ${t.width}x${t.height} bands=${t.bands.length} bps=${t.bitsPerSample} fmt=${t.sampleFormat} comp=${t.compression} tiled=${t.tiled} nodata=${t.nodata} origin=${t.origin?.x},${t.origin?.y} px=${t.pixel?.x},${t.pixel?.y}`);
+      t.bands.forEach((b, i) => notes.push(`${label} band${i}: ${stats(b, t.nodata)}`));
+    } catch (e) { notes.push(`${label} failed: ${String(e.message || e).slice(0, 200)}`); }
+    await sleep(2500);
   }
-  for (const id of ids) {
-    const q = `&request=GetCoverage&CoverageId=${encodeURIComponent(id)}&format=image/tiff&subsettingcrs=EPSG:4326&outputcrs=EPSG:4326&subset=x(-70,-60)&subset=y(40,50)&resolution=x(1)&resolution=y(1)`;
-    try {
-      const r = await fetch(base + q, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(60000) });
-      const b = Buffer.from(await r.arrayBuffer());
-      diag.wcs.push({ id, status: r.status, type: r.headers.get('content-type'), bytes: b.length, head: b.slice(0, 300).toString('latin1').replace(/[^\x20-\x7e]/g, '.') });
-    } catch (e) { diag.wcs.push({ id, error: String(e) }); }
+  // Does a TIME parameter select a different forecast step?
+  const ext = spd?.dims.time ? parseExtent(spd.dims.time.value) : null;
+  if (ext) {
+    const later = new Date(Math.min(ext.end, ext.start + 48 * 3600e3)).toISOString().replace('.000Z', 'Z');
+    for (const [label, extra] of [['TIME', `&TIME=${later}`], ['subset', `&subset=time("${later}")`]]) {
+      try { const t = readTiff(await wcs(spd.name, extra)); notes.push(`speed@+48h via ${label}: ${stats(t.bands[0], t.nodata)}`); }
+      catch (e) { notes.push(`speed@+48h via ${label} failed: ${String(e.message || e).slice(0, 160)}`); }
+      await sleep(2500);
+    }
   }
-  status.diag = diag;
+  status.diag = notes;
+  for (const n of notes) console.log(`::notice title=wind probe::${n}`);
 }
 
 // ---------- main ----------
