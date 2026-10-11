@@ -46,20 +46,56 @@ const bases = {
 };
 let stationLayer = null;
 
-// Gridded model fields arrive as square cells (15 km for GDPS). Asking ECCC for a
-// smaller image (about 2 pixels per grid cell) and letting the browser stretch it
-// gives bilinear blending: smooth gradients instead of blocks, and lighter tiles.
-const SmoothWMS = L.TileLayer.WMS.extend({
-  options: { gridKm: 0 },
-  getTileUrl(coords) {
-    const g = this.options.gridKm;
-    if (g) {
-      const size = this.options.tileSize;
-      const tileKm = (40075 * size) / 256 / 2 ** coords.z;
-      const n = Math.max(24, Math.min(size, Math.round((2.2 * tileKm) / g)));
-      this.wmsParams.width = n; this.wmsParams.height = n;
-    }
-    return L.TileLayer.WMS.prototype.getTileUrl.call(this, coords);
+// Gridded model fields (15 km for GDPS) are drawn as one image for the whole view,
+// requested at about one pixel per grid cell. The browser stretches it with bilinear
+// filtering, which blends the cells into smooth gradients with no tile seams.
+// A new time or view loads underneath and fades in over the old image.
+const FieldLayer = L.Layer.extend({
+  options: { pane: 'mainPane', opacity: 0.8, gridKm: 15, url: '', layers: '', time: null, attribution: '' },
+  initialize(opts) { L.setOptions(this, opts); },
+  getAttribution() { return this.options.attribution; },
+  onAdd(map) { this._map = map; map.on('moveend', this._update, this); this._update(); },
+  onRemove(map) {
+    map.off('moveend', this._update, this);
+    for (const k of ['_img', '_next']) if (this[k]) { map.removeLayer(this[k]); this[k] = null; }
+    this._url = null;
+  },
+  setTime(time) { this.options.time = time; this._update(); },
+  _update() {
+    const map = this._map;
+    if (!map) return;
+    const crs = map.options.crs, LIM = 20037508.34;
+    const b = map.getBounds().pad(0.2);
+    const sw = crs.project(b.getSouthWest()), ne = crs.project(b.getNorthEast());
+    const x0 = Math.max(-LIM, sw.x), x1 = Math.min(LIM, ne.x), y0 = Math.max(-LIM, sw.y), y1 = Math.min(LIM, ne.y);
+    if (x1 <= x0 || y1 <= y0) return;
+    const lat = Math.max(-80, Math.min(80, map.getCenter().lat));
+    const cellM = (this.options.gridKm * 1000) / Math.cos((lat * Math.PI) / 180);
+    const size = map.getSize();
+    const capX = Math.min(1600, size.x * 1.6), capY = Math.min(1600, size.y * 1.6);
+    let w = (x1 - x0) / cellM, h = (y1 - y0) / cellM;
+    const f = Math.min(1, capX / w, capY / h);
+    w = Math.max(8, Math.round(w * f)); h = Math.max(8, Math.round(h * f));
+    const q = { service: 'WMS', request: 'GetMap', version: '1.3.0', layers: this.options.layers, styles: '', format: 'image/png', transparent: 'true', crs: 'EPSG:3857', bbox: [x0, y0, x1, y1].map((v) => v.toFixed(0)).join(','), width: w, height: h };
+    if (this.options.time) q.time = this.options.time;
+    const url = `${this.options.url}?${new URLSearchParams(q)}`;
+    if (url === this._url) return;
+    this._url = url;
+    const bounds = L.latLngBounds(crs.unproject(L.point(x0, y0)), crs.unproject(L.point(x1, y1)));
+    const img = L.imageOverlay(url, bounds, { pane: this.options.pane, opacity: this._img ? 0 : this.options.opacity, interactive: false, className: 'field-img' });
+    if (this._next) map.removeLayer(this._next);
+    this._next = img;
+    img.once('load', () => {
+      if (this._next !== img || !this._map) return;
+      const el = img.getElement();
+      if (el && !reduceMotion) el.style.transition = 'opacity 380ms ease';
+      img.setOpacity(this.options.opacity);
+      const old = this._img;
+      this._img = img; this._next = null;
+      if (old) setTimeout(() => { if (this._img !== old && map.hasLayer(old)) map.removeLayer(old); }, 420);
+    });
+    img.once('error', () => { if (this._next === img) { map.removeLayer(img); this._next = null; this._url = null; } });
+    img.addTo(map);
   },
 });
 const slots = new Map(); // layer id -> { lyr, time, pending }
@@ -126,10 +162,13 @@ function resolveTime(def, e, t) {
   if (!ext) return { show: true, param: null, label: 'no time sync' };
   const s = snapTime(ext, t, 'nearest');
   const outside = t < ext.start - 3 * 3600e3 || t > ext.end + 3 * 3600e3;
-  return { show: true, param: isoForWms(s, ext.dateOnly), label: `valid ${fmtZ(s)}${outside ? ' (nearest)' : ''}`, ms: s, warn: outside };
+  return { show: true, param: isoForWms(s, ext.dateOnly), label: `valid ${fmtZd(s)}${outside ? ' (nearest)' : ''}`, ms: s, warn: outside };
 }
 
 const selectedTime = () => S.now + S.offset * MIN;
+// "Mon 00:00Z" when the time is on a different UTC day from now, else "00:00Z".
+const fmtZd = (ms) => (new Date(ms).toISOString().slice(0, 10) === new Date(S.now).toISOString().slice(0, 10)
+  ? fmtZ(ms) : `${new Intl.DateTimeFormat('en-CA', { weekday: 'short', timeZone: 'UTC' }).format(ms)} ${fmtZ(ms)}`);
 
 function stepMinutes(dir) {
   if (S.offset + dir * 10 <= 0 && S.offset <= 0) return 10;
@@ -147,13 +186,14 @@ function makeWms(def, time) {
   const names = e?.names || (def.combine ? def.candidates : [def.candidates[0]]);
   const pane = def.group === 'main' ? 'mainPane' : def.id === 'labels' ? 'labelPane' : 'overlayPane2';
   const onFallback = e && def.fallback && e.source === def.fallback.source;
+  const gridKm = (onFallback ? def.fallback.gridKm : def.gridKm) || 0;
+  if (gridKm) return new FieldLayer({ url: src.wms, layers: names.join(','), time, gridKm, pane, opacity: opacityOf(def), attribution: src.label });
   const opts = {
     layers: names.join(','), styles: '', format: 'image/png', transparent: true, version: '1.3.0',
-    tileSize: 512, pane, opacity: opacityOf(def), gridKm: (onFallback ? def.fallback.gridKm : def.gridKm) || 0,
-    attribution: src.label, bounds: [[-85, -180], [85, 180]], noWrap: false, keepBuffer: 1,
+    tileSize: 512, pane, opacity: opacityOf(def), attribution: src.label, bounds: [[-85, -180], [85, 180]], noWrap: false, keepBuffer: 1,
   };
   if (time) opts.time = time;
-  return new SmoothWMS(src.wms, opts);
+  return L.tileLayer.wms(src.wms, opts);
 }
 
 // Show a layer at a time. A new time loads underneath and fades in over the old
@@ -162,6 +202,11 @@ function showLayer(def, time) {
   const key = time || 'latest';
   let slot = slots.get(def.id);
   if (slot && slot.time === key) { if (!map.hasLayer(slot.lyr)) slot.lyr.addTo(map); return; }
+  if (slot && slot.lyr instanceof FieldLayer) {
+    slot.time = key; slot.lyr.setTime(time);
+    if (!map.hasLayer(slot.lyr)) slot.lyr.addTo(map);
+    return;
+  }
   const lyr = makeWms(def, time);
   if (!slot || !map.hasLayer(slot.lyr) || reduceMotion) {
     if (slot) { if (slot.lyr) map.removeLayer(slot.lyr); if (slot.pending) map.removeLayer(slot.pending); }
@@ -268,7 +313,7 @@ function renderChips() {
     const wt = windTimeFor(t);
     wind = wt == null
       ? `<span class="chip off"><b>Wind animation</b> <span class="t">${S.wind.index ? 'no data for this time' : 'not available yet'}</span></span>`
-      : `<span class="chip"><b>Wind animation</b>GDPS · <span class="t">valid ${esc(fmtZ(wt))}</span></span>`;
+      : `<span class="chip"><b>Wind animation</b>GDPS · <span class="t">valid ${esc(fmtZd(wt))}</span></span>`;
   }
   $('#chips').innerHTML = html + wind;
 }
@@ -318,7 +363,7 @@ function setBase(id) {
 
 // ---------- stations ----------
 function updateStations() {
-  const want = S.overlays.has('stations') && S.metar && map.getZoom() >= 4;
+  const want = S.overlays.has('stations') && S.metar && map.getZoom() >= 6;
   if (!want) { if (stationLayer) map.removeLayer(stationLayer); return; }
   if (!stationLayer) {
     const renderer = L.canvas({ pane: 'stationPane', padding: 0.3 });
