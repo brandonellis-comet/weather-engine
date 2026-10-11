@@ -1,6 +1,7 @@
 // Weather Engine — map, time sync, point forecast, METAR/TAF.
 import { parseMetar, parseTaf, metarToPlain, tafToPlain, tafRawLines } from './decoder.js';
 import { parseExtent, snapTime, isoForWms, fmtZ } from './timeext.js';
+import { createWindLayer, decodeGrid } from './wind.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -24,25 +25,45 @@ const S = {
   main: store.get('main', 'temp'), overlays: new Set(store.get('overlays', null) || []), base: store.get('base', 'osm'),
   now: Date.now(), offset: 0, playing: false, timer: null,
   view: store.get('view', 'plain'), point: null, tab: 'temp',
+  wind: { index: null, cache: new Map(), layer: null, time: null },
 };
 
 // ---------- map ----------
 const map = L.map('map', { zoomControl: false, worldCopyJump: true, minZoom: 2, maxZoom: 12, preferCanvas: true })
   .setView(store.get('center', [45.6, -63.2]), store.get('zoom', 5));
 L.control.zoom({ position: 'topright' }).addTo(map);
-for (const [name, z] of [['mainPane', 300], ['overlayPane2', 350], ['labelPane', 380], ['stationPane', 450]]) {
+for (const [name, z] of [['mainPane', 300], ['windPane', 340], ['overlayPane2', 350], ['labelPane', 380], ['stationPane', 450]]) {
   map.createPane(name).style.zIndex = z;
 }
 map.getPane('labelPane').style.pointerEvents = 'none';
 map.getPane('mainPane').style.pointerEvents = 'none';
 map.getPane('overlayPane2').style.pointerEvents = 'none';
+map.getPane('windPane').style.pointerEvents = 'none';
 
 const bases = {
   osm: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }),
   relief: L.tileLayer.wms('https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi', { layers: 'BlueMarble_ShadedRelief_Bathymetry', format: 'image/jpeg', version: '1.3.0', tileSize: 512, attribution: 'NASA GIBS' }),
 };
-const live = new Map(); // layer id -> Leaflet layer
 let stationLayer = null;
+
+// Gridded model fields arrive as square cells (15 km for GDPS). Asking ECCC for a
+// smaller image (about 2 pixels per grid cell) and letting the browser stretch it
+// gives bilinear blending: smooth gradients instead of blocks, and lighter tiles.
+const SmoothWMS = L.TileLayer.WMS.extend({
+  options: { gridKm: 0 },
+  getTileUrl(coords) {
+    const g = this.options.gridKm;
+    if (g) {
+      const size = this.options.tileSize;
+      const tileKm = (40075 * size) / 256 / 2 ** coords.z;
+      const n = Math.max(24, Math.min(size, Math.round((2.2 * tileKm) / g)));
+      this.wmsParams.width = n; this.wmsParams.height = n;
+    }
+    return L.TileLayer.WMS.prototype.getTileUrl.call(this, coords);
+  },
+});
+const slots = new Map(); // layer id -> { lyr, time, pending }
+const WindLayer = createWindLayer(L);
 
 // ---------- data ----------
 async function getJson(url) {
@@ -57,6 +78,7 @@ async function loadCore() {
   try { S.status = await getJson('data/status.json'); } catch { S.status = null; }
   if (!store.get('overlays', null)) { S.config.layers.filter((l) => l.default).forEach((l) => S.overlays.add(l.id)); S.overlays.add('stations'); }
   if (!S.config.layers.some((l) => l.id === S.main && l.group === 'main')) S.main = 'temp';
+  if (!store.get('windAdded', false)) { S.overlays.add('wind'); store.set('windAdded', true); store.set('overlays', [...S.overlays]); }
 }
 
 async function loadMetar() {
@@ -118,28 +140,67 @@ function stepMinutes(dir) {
 }
 
 // ---------- layers ----------
-function makeWms(def) {
+const opacityOf = (def) => (def.group === 'main' ? 0.8 : 0.92);
+function makeWms(def, time) {
   const e = entryOf(def.id);
   const src = S.config.sources[e?.source || def.source];
   const names = e?.names || (def.combine ? def.candidates : [def.candidates[0]]);
   const pane = def.group === 'main' ? 'mainPane' : def.id === 'labels' ? 'labelPane' : 'overlayPane2';
-  return L.tileLayer.wms(src.wms, {
+  const onFallback = e && def.fallback && e.source === def.fallback.source;
+  const opts = {
     layers: names.join(','), styles: '', format: 'image/png', transparent: true, version: '1.3.0',
-    tileSize: 512, pane, opacity: def.group === 'main' ? 0.78 : 0.92,
-    attribution: src.label, bounds: [[-85, -180], [85, 180]], noWrap: false,
+    tileSize: 512, pane, opacity: opacityOf(def), gridKm: (onFallback ? def.fallback.gridKm : def.gridKm) || 0,
+    attribution: src.label, bounds: [[-85, -180], [85, 180]], noWrap: false, keepBuffer: 1,
+  };
+  if (time) opts.time = time;
+  return new SmoothWMS(src.wms, opts);
+}
+
+// Show a layer at a time. A new time loads underneath and fades in over the old
+// one, so scrubbing and playback flow instead of flashing blank tiles.
+function showLayer(def, time) {
+  const key = time || 'latest';
+  let slot = slots.get(def.id);
+  if (slot && slot.time === key) { if (!map.hasLayer(slot.lyr)) slot.lyr.addTo(map); return; }
+  const lyr = makeWms(def, time);
+  if (!slot || !map.hasLayer(slot.lyr) || reduceMotion) {
+    if (slot) { if (slot.lyr) map.removeLayer(slot.lyr); if (slot.pending) map.removeLayer(slot.pending); }
+    lyr.addTo(map);
+    slots.set(def.id, { lyr, time: key, pending: null });
+    return;
+  }
+  if (slot.pending) map.removeLayer(slot.pending);
+  lyr.setOpacity(0);
+  lyr.addTo(map);
+  slot.pending = lyr;
+  lyr.once('load', () => {
+    if (slot.pending !== lyr) return;
+    const c = lyr.getContainer();
+    if (c) c.style.transition = 'opacity 380ms ease';
+    lyr.setOpacity(opacityOf(def));
+    const old = slot.lyr;
+    slot.lyr = lyr; slot.time = key; slot.pending = null;
+    setTimeout(() => { if (old !== slot.lyr && map.hasLayer(old)) map.removeLayer(old); }, 420);
   });
 }
+function hideLayer(id) {
+  const slot = slots.get(id);
+  if (!slot) return;
+  if (slot.lyr && map.hasLayer(slot.lyr)) map.removeLayer(slot.lyr);
+  if (slot.pending) { map.removeLayer(slot.pending); slot.pending = null; }
+}
+function resetLayers() { for (const id of [...slots.keys()]) hideLayer(id); slots.clear(); }
 
 let paramTimer = null;
 function applyTime(immediate = false) {
   updateReadout();
   clearTimeout(paramTimer);
-  const run = () => { syncLayers(); renderChips(); };
+  const run = () => { syncLayers(); syncWind(); renderChips(); };
   if (immediate) run(); else { renderChips(); paramTimer = setTimeout(run, 220); }
 }
 
 function activeIds() {
-  return [S.main, ...[...S.overlays].filter((id) => id !== 'stations')];
+  return [S.main, ...[...S.overlays].filter((id) => id !== 'stations' && id !== 'wind')];
 }
 
 function syncLayers() {
@@ -150,16 +211,46 @@ function syncLayers() {
     const r = resolveTime(def, entryOf(id), t);
     if (!r.show) continue;
     want.add(id);
-    let lyr = live.get(id);
-    if (!lyr) { lyr = makeWms(def); live.set(id, lyr); }
-    const p = r.param || undefined;
-    if (lyr.wmsParams.time !== p) {
-      if (p) lyr.setParams({ time: p }, false); else { delete lyr.wmsParams.time; lyr.redraw(); }
-    }
-    if (!map.hasLayer(lyr)) lyr.addTo(map);
+    showLayer(def, r.param || null);
   }
-  for (const [id, lyr] of live) if (!want.has(id) && map.hasLayer(lyr)) map.removeLayer(lyr);
+  for (const id of slots.keys()) if (!want.has(id)) hideLayer(id);
   renderLegend();
+}
+
+// ---------- wind animation ----------
+async function loadWindIndex() {
+  try { S.wind.index = await getJson('data/wind/index.json'); } catch { S.wind.index = null; }
+}
+function windTimeFor(t) {
+  const times = S.wind.index?.times;
+  if (!times?.length) return null;
+  let best = null;
+  for (const s of times) { const ms = Date.parse(s); if (best == null || Math.abs(ms - t) < Math.abs(best - t)) best = ms; }
+  return Math.abs(best - t) <= 3.1 * 3600e3 ? best : null;
+}
+async function syncWind() {
+  const t = windTimeFor(selectedTime());
+  if (!S.overlays.has('wind') || t == null) {
+    if (S.wind.layer && map.hasLayer(S.wind.layer)) map.removeLayer(S.wind.layer);
+    S.wind.time = null;
+    return;
+  }
+  if (!S.wind.layer) S.wind.layer = new WindLayer({ still: reduceMotion });
+  if (!map.hasLayer(S.wind.layer)) S.wind.layer.addTo(map);
+  if (S.wind.time === t) return;
+  S.wind.time = t;
+  const name = S.wind.index.files[new Date(t).toISOString().replace('.000Z', 'Z')];
+  let grid = S.wind.cache.get(name);
+  if (!grid) {
+    try {
+      const res = await fetch(`data/wind/${name}`);
+      if (!res.ok) throw new Error(res.status);
+      grid = decodeGrid(S.wind.index, await res.arrayBuffer());
+    } catch { return; }
+    S.wind.cache.set(name, grid);
+    if (S.wind.cache.size > 8) S.wind.cache.delete(S.wind.cache.keys().next().value);
+  }
+  if (S.wind.time === t) S.wind.layer.setGrid(grid);
 }
 
 function renderChips() {
@@ -172,7 +263,14 @@ function renderChips() {
     const ref = e?.reference && kindOf(def, e) === 'model' ? ` · run ${fmtZ(Date.parse(e.reference)).replace(':00Z', 'Z')}` : '';
     return `<span class="chip${r.show ? '' : ' off'}${r.warn || e?.stale ? ' warn' : ''}"><b>${esc(def.label)}</b>${model ? esc(model) + ' ·' : ''} <span class="t">${esc(r.label)}</span>${esc(ref)}</span>`;
   }).join('');
-  $('#chips').innerHTML = html;
+  let wind = '';
+  if (S.overlays.has('wind')) {
+    const wt = windTimeFor(t);
+    wind = wt == null
+      ? `<span class="chip off"><b>Wind animation</b> <span class="t">${S.wind.index ? 'no data for this time' : 'not available yet'}</span></span>`
+      : `<span class="chip"><b>Wind animation</b>GDPS · <span class="t">valid ${esc(fmtZ(wt))}</span></span>`;
+  }
+  $('#chips').innerHTML = html + wind;
 }
 
 function renderLegend() {
@@ -199,7 +297,8 @@ function renderRail() {
   };
   $('#mainList').innerHTML = S.config.layers.filter((l) => l.group === 'main').map((d) => item(d, 'radio')).join('');
   const stationsDef = { id: 'stations', label: 'METAR stations', coverage: S.metar ? `${S.metar.stations.length.toLocaleString('en-CA')} stations, worldwide` : 'loading…' };
-  $('#overlayList').innerHTML = [...S.config.layers.filter((l) => l.group === 'overlay'), stationsDef].map((d) => item(d, 'check')).join('');
+  const windDef = { id: 'wind', label: 'Wind animation', coverage: S.wind.index ? 'Global · ECCC GDPS 10 m wind' : 'waiting for first wind run' };
+  $('#overlayList').innerHTML = [windDef, ...S.config.layers.filter((l) => l.group === 'overlay'), stationsDef].map((d) => item(d, 'check')).join('');
   document.querySelectorAll('[data-base]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.base === S.base)));
 }
 
@@ -598,8 +697,14 @@ function wire() {
 async function refresh() {
   const atNow = S.offset === 0;
   S.now = Date.now();
+  const names = (c) => JSON.stringify(Object.fromEntries(Object.entries(c?.layers || {}).map(([k, v]) => [k, v?.names])));
+  const before = names(S.catalog);
   try { S.catalog = await getJson('data/catalog.json'); } catch { /* keep last */ }
   try { S.status = await getJson('data/status.json'); } catch { /* keep last */ }
+  if (names(S.catalog) !== before) resetLayers();
+  const windRun = S.wind.index?.generated;
+  await loadWindIndex();
+  if (S.wind.index?.generated !== windRun) { S.wind.cache.clear(); S.wind.time = null; }
   await loadMetar();
   S.taf = null;
   if (stationLayer) { map.removeLayer(stationLayer); stationLayer = null; }
@@ -610,6 +715,7 @@ async function refresh() {
 (async function init() {
   await loadCore();
   setBase(S.base in bases ? S.base : 'osm');
+  await loadWindIndex();
   renderRail(); renderTicks(); wire(); renderStatus();
   applyTime(true);
   await loadMetar();

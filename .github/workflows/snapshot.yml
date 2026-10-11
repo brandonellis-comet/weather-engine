@@ -1,0 +1,41 @@
+name: Snapshot
+
+# On demand: screenshots of the live site in a real browser, published to the
+# `snapshots` branch so changes can be checked visually.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  shot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install browser
+        run: npm install --no-save playwright@1.48.2 && npx playwright install --with-deps chromium
+
+      - name: Take screenshots
+        run: |
+          export SITE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
+          node scripts/snapshot.mjs
+
+      - name: Publish to the snapshots branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/shots && cp -r shots/. /tmp/shots/
+          rm -rf node_modules shots
+          git checkout --orphan snapshots
+          git rm -rf --quiet .
+          cp -r /tmp/shots/. .
+          git add -A
+          git commit -m "Screenshots $(date -u +%FT%TZ)"
+          git push -f origin snapshots

@@ -283,53 +283,6 @@ async function checkModels(config, catalog) {
   }
 }
 
-// ---------- temporary: wind data probe (diagnostics for the wind animation) ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function wcs(id, extra = '') {
-  const url = `https://geo.weather.gc.ca/geomet?service=WCS&version=2.0.1&request=GetCoverage&CoverageId=${encodeURIComponent(id)}&format=image/tiff&subsettingcrs=EPSG:4326&outputcrs=EPSG:4326&subset=x(-180,180)&subset=y(-90,90)&resolution=x(1)&resolution=y(1)${extra}`;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(90000) });
-    const b = Buffer.from(await r.arrayBuffer());
-    if (r.status === 429) { await sleep(12000); continue; }
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${b.slice(0, 160).toString('latin1')}`);
-    return b;
-  }
-  throw new Error('HTTP 429 three times');
-}
-async function windProbe() {
-  if (FIX) return;
-  const { readTiff } = await import('./tiff.mjs');
-  const g = CAPS.geomet || [];
-  const notes = [];
-  const pick = (re) => g.find((l) => re.test(l.name));
-  const spd = pick(/^GDPS_15km_WindSpeed_10m$/), dir = pick(/^GDPS_15km_WindDir_10m$/), vec = pick(/^GDPS_15km_Winds_10m$/);
-  notes.push(`layers: speed=${spd?.name || '-'} dir=${dir?.name || '-'} vector=${vec?.name || '-'}`);
-  notes.push(`speed time=${spd?.dims.time?.value.slice(0, 70)} default=${spd?.dims.time?.default}`);
-  notes.push(`speed title=${spd?.title?.slice(0, 90)}`);
-  const stats = (a, nd) => { let n = 0, s = 0, mn = Infinity, mx = -Infinity, bad = 0; for (const v of a) { if (!Number.isFinite(v) || v === nd || Math.abs(v) > 1e6) { bad++; continue; } n++; s += v; if (v < mn) mn = v; if (v > mx) mx = v; } return `n=${n} bad=${bad} min=${mn.toFixed(2)} max=${mx.toFixed(2)} mean=${(s / n).toFixed(2)}`; };
-  for (const [label, l, extra] of [['speed', spd, ''], ['dir', dir, ''], ['vector', vec, '']]) {
-    if (!l) continue;
-    try {
-      const t = readTiff(await wcs(l.name, extra));
-      notes.push(`${label}: ${t.width}x${t.height} bands=${t.bands.length} bps=${t.bitsPerSample} fmt=${t.sampleFormat} comp=${t.compression} tiled=${t.tiled} nodata=${t.nodata} origin=${t.origin?.x},${t.origin?.y} px=${t.pixel?.x},${t.pixel?.y}`);
-      t.bands.forEach((b, i) => notes.push(`${label} band${i}: ${stats(b, t.nodata)}`));
-    } catch (e) { notes.push(`${label} failed: ${String(e.message || e).slice(0, 200)}`); }
-    await sleep(2500);
-  }
-  // Does a TIME parameter select a different forecast step?
-  const ext = spd?.dims.time ? parseExtent(spd.dims.time.value) : null;
-  if (ext) {
-    const later = new Date(Math.min(ext.end, ext.start + 48 * 3600e3)).toISOString().replace('.000Z', 'Z');
-    for (const [label, extra] of [['TIME', `&TIME=${later}`], ['subset', `&subset=time("${later}")`]]) {
-      try { const t = readTiff(await wcs(spd.name, extra)); notes.push(`speed@+48h via ${label}: ${stats(t.bands[0], t.nodata)}`); }
-      catch (e) { notes.push(`speed@+48h via ${label} failed: ${String(e.message || e).slice(0, 160)}`); }
-      await sleep(2500);
-    }
-  }
-  status.diag = notes;
-  for (const n of notes) console.log(`::notice title=wind probe::${n}`);
-}
-
 // ---------- main ----------
 export async function main() {
   await mkdir(OUT, { recursive: true });
@@ -337,7 +290,16 @@ export async function main() {
   await buildAviation();
   const catalog = await buildCatalog(config);
   await checkModels(config, catalog);
-  try { await windProbe(); } catch (e) { status.diag = { error: String(e) }; }
+  if (!FIX) {
+    try {
+      const { buildWind } = await import('./wind.mjs');
+      await buildWind({ caps: CAPS.geomet, outDir: OUT, pagesUrl: PAGES, ua: UA, log, status });
+    } catch (e) {
+      status.sources.wind = { ok: false, error: String(e.message || e) };
+      log('Wind failed:', e.message);
+      try { const { copyPrevious } = await import('./wind.mjs'); await copyPrevious({ outDir: OUT, pagesUrl: PAGES, status }); } catch { /* nothing to reuse */ }
+    }
+  }
   await writeJson('catalog.json', catalog);
   await writeJson('status.json', status);
   const bad = [...Object.entries(status.sources), ...Object.entries(status.layers), ...Object.entries(status.models)].filter(([, v]) => !v.ok);
