@@ -215,8 +215,9 @@ function entryFor(def, sourceId, layers) {
   };
 }
 
+const CAPS = {};
 async function buildCatalog(config) {
-  const caps = {};
+  const caps = CAPS;
   for (const [id, src] of Object.entries(config.sources)) {
     try {
       const xml = await getText(src.capabilities);
@@ -282,6 +283,33 @@ async function checkModels(config, catalog) {
   }
 }
 
+// ---------- temporary: wind data probe (diagnostics for the wind animation) ----------
+async function windProbe() {
+  if (FIX) return;
+  const diag = {};
+  const g = CAPS.geomet || [];
+  const wind = g.filter((l) => /^GDPS/i.test(l.name) && /wind|_UU|_VV|_WD|_UV/i.test(`${l.name} ${l.title}`));
+  diag.windLayers = wind.slice(0, 60).map((l) => `${l.name} | ${l.title} | styles:${l.styles.slice(0, 4).join(',')} | time:${l.dims.time ? l.dims.time.value.slice(0, 60) : ''}`);
+  const ids = wind.map((l) => l.name).filter((n) => /10m|ETA_UU|ETA_VV|ETA_WD|_UU$|_VV$/i.test(n)).slice(0, 6);
+  diag.wcs = [];
+  const base = 'https://geo.weather.gc.ca/geomet?service=WCS&version=2.0.1';
+  if (ids[0]) {
+    try {
+      const r = await fetch(`${base}&request=DescribeCoverage&CoverageId=${encodeURIComponent(ids[0])}`, { headers: { 'User-Agent': UA } });
+      diag.describe = (await r.text()).replace(/\s+/g, ' ').slice(0, 3000);
+    } catch (e) { diag.describe = String(e); }
+  }
+  for (const id of ids) {
+    const q = `&request=GetCoverage&CoverageId=${encodeURIComponent(id)}&format=image/tiff&subsettingcrs=EPSG:4326&outputcrs=EPSG:4326&subset=x(-70,-60)&subset=y(40,50)&resolution=x(1)&resolution=y(1)`;
+    try {
+      const r = await fetch(base + q, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(60000) });
+      const b = Buffer.from(await r.arrayBuffer());
+      diag.wcs.push({ id, status: r.status, type: r.headers.get('content-type'), bytes: b.length, head: b.slice(0, 300).toString('latin1').replace(/[^\x20-\x7e]/g, '.') });
+    } catch (e) { diag.wcs.push({ id, error: String(e) }); }
+  }
+  status.diag = diag;
+}
+
 // ---------- main ----------
 export async function main() {
   await mkdir(OUT, { recursive: true });
@@ -289,6 +317,7 @@ export async function main() {
   await buildAviation();
   const catalog = await buildCatalog(config);
   await checkModels(config, catalog);
+  try { await windProbe(); } catch (e) { status.diag = { error: String(e) }; }
   await writeJson('catalog.json', catalog);
   await writeJson('status.json', status);
   const bad = [...Object.entries(status.sources), ...Object.entries(status.layers), ...Object.entries(status.models)].filter(([, v]) => !v.ok);
