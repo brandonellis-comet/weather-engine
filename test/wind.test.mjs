@@ -34,13 +34,13 @@ test('westerly check is positive for eastward flow at mid-latitudes', () => {
   assert.ok(westerlyCheck(new Float32Array([-5, -5, -5, -5]), nx, la1, dy) < 0);
 });
 
-test('target hours: 3-hourly to 48 h, 6-hourly to 120 h, snapped to model hours', () => {
+test('target hours: 3-hourly to 48 h, 6-hourly to 120 h, aligned to model steps', () => {
   const now = Date.parse('2026-10-11T23:20:00Z');
   const ext = parseExtent('2026-10-11T12:00:00Z/2026-10-21T12:00:00Z/PT1H');
   const t = targetTimes(ext, now).map((x) => new Date(x).toISOString().slice(5, 13));
-  assert.equal(t[0], '10-11T20');
-  assert.equal(t[1], '10-11T23');
-  assert.equal(t[2], '10-12T02');
-  assert.equal(t.at(-1), '10-16T23');
+  assert.equal(t[0], '10-11T18');
+  assert.equal(t[1], '10-11T21');
+  assert.equal(t[2], '10-12T00');   // same 3-hourly steps as the GDPS layers (run 12Z)
+  assert.equal(t.at(-1), '10-16T21');
   assert.equal(t.length, 1 + 17 + 12);
 });

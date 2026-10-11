@@ -46,11 +46,13 @@ export function westerlyCheck(u, nx, la1, dy) {
   return n ? s / n : 0;
 }
 
-// Forecast hours to publish: −3 h, then every 3 h to +48 h, then every 6 h to +120 h,
-// snapped to hours the model actually has.
+// Forecast hours to publish: one step back, then every 3 h to +48 h, then every 6 h
+// to +120 h. Aligned to the model's own 3-hourly steps from the run time, so the
+// particles always show the same hour as the GDPS colour layers.
 export function targetTimes(ext, now = Date.now()) {
-  const h = 3600e3, base = Math.floor(now / h) * h;
-  const want = [base - 3 * h];
+  const h = 3600e3, step = 3 * h;
+  const base = ext.start + Math.floor((now - ext.start) / step) * step;
+  const want = [base - step];
   for (let k = 0; k <= 48; k += 3) want.push(base + k * h);
   for (let k = 54; k <= 120; k += 6) want.push(base + k * h);
   const out = new Set();

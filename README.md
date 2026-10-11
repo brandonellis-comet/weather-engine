@@ -25,6 +25,7 @@ After that it updates itself every 30 minutes.
 |---|---|
 | **Main layer** (left panel, or the layers button on a phone) | One weather field at a time: temperature, wind, gusts, precipitation, pressure, cloud, thunderstorm potential, waves, ocean temperature, air quality, satellite. |
 | **Overlays** | Stack on top of the main layer: radar (rain/snow), lightning, ECCC warnings, coastlines/labels, METAR stations. |
+| **Wind animation** (overlay, on by default) | Moving particles from ECCC GDPS 10 m wind, synced to the time bar. Global, out to +5 days. |
 | **Time bar** | One clock for every layer. Drag it, step it, press play, or use the jump buttons (−3h to +5d). The past is observations; the future is forecast. |
 | **Chips under the time bar** | Show the time each layer is actually displaying, and the model run. If a layer can't match the selected time, its chip says so (e.g. radar shows *observations only* for future times). |
 | **Tap the map** | Point forecast: GEM vs ECMWF vs GFS, a model-agreement rating, a 7-day temperature chart, and tables for temp, wind, precip, pressure and cloud. Shows the nearest station within 60 km. |
@@ -58,8 +59,9 @@ After that it updates itself every 30 minutes.
 
 1. Runs the decoder and data-job tests.
 2. `scripts/build-data.mjs` pulls METAR/TAF, then reads the **live** ECCC and NASA layer catalogues and resolves each map layer by name and rule. ECCC is mid-way through renaming its GDPS layers (`GDPS.ETA_*` → `GDPS_15km_*`), so names are never hard-coded.
-3. It checks every feed for age and availability and writes `status.json`. That is the **Feeds** button, and the run's *Summary* page on GitHub.
-4. It republishes the site. If one source fails, the rest still publish, and the failed one keeps its last good copy marked *stale*.
+3. It builds the wind animation grids from ECCC GDPS 10 m wind (GeoMet WCS). Only new forecast hours are requested from ECCC; hours already published for the same model run are reused, and requests are paced because ECCC rate-limits rapid calls.
+4. It checks every feed for age and availability and writes `status.json`. That is the **Feeds** button, and the run's *Summary* page on GitHub.
+5. It republishes the site. If one source fails, the rest still publish, and the failed one keeps its last good copy marked *stale*.
 
 ## 5. Maintenance
 
@@ -69,6 +71,7 @@ After that it updates itself every 30 minutes.
 | Site stops updating after ~2 months | GitHub pauses scheduled jobs in repos with no activity for 60 days. Actions tab → **Update data and deploy** → **Enable workflow**. Any commit also resets the clock. |
 | A METAR shows lines under *Not decoded* | Real-world format the rules don't cover yet. Add a test in `test/decoder.test.mjs` with the report, then extend `site/js/decoder.js`. |
 | Run the tests locally | `npm test` (Node 20+) |
+| Check the live site visually | Actions tab → **Snapshot** → **Run workflow**. Screenshots land on the `snapshots` branch. |
 
 ## 6. Known gaps (version 1)
 
@@ -76,12 +79,12 @@ After that it updates itself every 30 minutes.
 - **Lightning** covers Canada (+250 km) only.
 - **Warnings** cover Canada only.
 - **Global satellite IR** has no coverage over Europe, Africa or the Indian Ocean. NASA GIBS doesn't carry Meteosat; true colour covers it daily.
-- **No animated wind particles yet.** That's Phase 3 (below).
+- **Wind animation** uses a 1° grid (about 110 km), so it shows the flow pattern, not local gusts. The colour layers underneath carry the 15 km detail.
 
 ## 7. Roadmap
 
 - **Phase 2: analysis.** An AI watchdog reviews `status.json` and cross-checks layers (radar vs model vs METAR). Anomaly flags against ECCC climate normals. Daily brief.
-- **Phase 3: depth.** Animated wind from raw GDPS/GFS data (processed by the same scheduled job, no home server needed), storm and tropical tracking (Canadian Hurricane Centre / NHC), real-time alerts.
+- **Phase 3: depth.** Storm and tropical tracking (Canadian Hurricane Centre / NHC), real-time alerts. (Animated wind is done: built by the scheduled job from ECCC GDPS, no home server needed.)
 
 ## Layout
 
@@ -92,9 +95,13 @@ site/                  the published website
   js/app.js            map, time sync, point forecast, METAR/TAF panel
   js/decoder.js        METAR/TAF decoder (rule-based)
   js/timeext.js        time snapping shared by site and data job
+  js/wind.js           wind particle animation
   config/layers.json   layer definitions: edit layers here
   data/                written by the scheduled job (not committed)
 scripts/build-data.mjs scheduled data job
+scripts/wind.mjs       wind animation grids from ECCC GDPS
+scripts/tiff.mjs       GeoTIFF reader for ECCC raw data
+scripts/snapshot.mjs   live-site screenshots (Snapshot workflow)
 test/                  decoder, time and data-job tests
 .github/workflows/     schedule + deploy
 ```
