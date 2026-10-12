@@ -15,6 +15,8 @@ const views = [
   { name: 'iphone-z4', engine: 'webkit', device: iphone, main: 'wind', center: [45, -55], zoom: 4 },
   { name: 'iphone-layers', engine: 'webkit', device: iphone, main: 'temp', center: [44.8, -63.4], zoom: 6, click: '#railToggle' },
   { name: 'iphone-legend', engine: 'webkit', device: iphone, main: 'temp', center: [44.8, -63.4], zoom: 6, click: '.legend-head' },
+  { name: 'iphone-sat-z10', engine: 'webkit', device: iphone, main: 'sat_eccc', center: [44.66, -63.58], zoom: 10 },
+  { name: 'iphone-radar-z9', engine: 'webkit', device: iphone, main: 'temp', center: [45.5, -61.5], zoom: 8 },
   { name: 'desktop-z5', engine: 'chromium', vp: { width: 1280, height: 800 }, dpr: 1, main: 'pressure', center: [46, -60], zoom: 5 },
 ];
 
