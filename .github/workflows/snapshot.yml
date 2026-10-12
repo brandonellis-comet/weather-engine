@@ -31,7 +31,11 @@ jobs:
         run: |
           export SITE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
           export VIEWS="${{ inputs.views }}"
-          timeout 1200 node scripts/snapshot.mjs || echo "snapshot script exited early"
+          if [ "$VIEWS" = "perf" ]; then
+            timeout 900 node scripts/perf.mjs || echo "perf script exited early"
+          else
+            timeout 1200 node scripts/snapshot.mjs || echo "snapshot script exited early"
+          fi
 
       - name: Publish to the snapshots branch
         if: always()
