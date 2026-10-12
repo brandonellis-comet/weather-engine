@@ -127,8 +127,8 @@ export const fireLon = (d, i) => d.gx[i] / d.grid;
 export const fireAgeMin = (d, i, now = Date.now()) => d.age[i] + Math.max(0, (now - d.generated) / 60000);
 export const FIRE_AGES = [
   { max: 6 * 60, color: '#ff2a12', label: 'under 6 h' },
-  { max: 12 * 60, color: '#ff8c1a', label: '6 to 12 h' },
-  { max: Infinity, color: '#ffd04d', label: '12 to 24 h' },
+  { max: 12 * 60, color: '#ff9a1f', label: '6 to 12 h' },
+  { max: Infinity, color: '#ffe14d', label: '12 to 24 h' },
 ];
 export const fireBucket = (ageMin) => FIRE_AGES.findIndex((b) => ageMin < b.max);
 export const SATS = [[4, 'Suomi NPP'], [8, 'NOAA-20'], [16, 'NOAA-21']];
@@ -154,7 +154,7 @@ export function createFireLayer(L) {
       this._canvas.remove();
       this._map = null;
     },
-    _radius(z) { return z <= 3 ? 1.7 : z <= 5 ? 2.3 : z <= 7 ? 3.2 : 4.2; },
+    _radius(z) { return z <= 3 ? 1.4 : z <= 5 ? 2 : z <= 7 ? 3 : 4; },
     _draw() {
       const map = this._map; if (!map) return;
       const size = map.getSize(), dpr = Math.min(window.devicePixelRatio || 1, 2), c = this._canvas;
@@ -167,7 +167,10 @@ export function createFireLayer(L) {
       const d = this._d; if (!d) return;
       const z = map.getZoom(), scale = 256 * 2 ** z, o = map.getPixelBounds().min;
       const r = this._radius(z), now = Date.now();
-      const paths = FIRE_AGES.map(() => new Path2D());
+      // Every dot sits on a dark halo, drawn first for all dots, so the fills stay
+      // readable over any weather colour and dense clusters don't turn into dark rings.
+      const paths = FIRE_AGES.map(() => new Path2D()), halo = new Path2D();
+      const hw = z <= 4 ? 1 : 1.5;
       const pad = 8;
       for (let i = 0; i < d.n; i++) {
         const y = d.py[i] * scale - o.y;
@@ -180,13 +183,15 @@ export function createFireLayer(L) {
           if (x < -pad) continue;
           paths[b].moveTo(x + rr, y);
           paths[b].arc(x, y, rr, 0, 2 * Math.PI);
+          halo.moveTo(x + rr + hw, y);
+          halo.arc(x, y, rr + hw, 0, 2 * Math.PI);
         }
       }
-      ctx.lineWidth = z <= 4 ? 0.8 : 1.2;
-      ctx.strokeStyle = 'rgb(40 8 0 / .85)';
+      ctx.fillStyle = 'rgb(30 6 0 / .78)';
+      ctx.fill(halo);
       for (let b = FIRE_AGES.length - 1; b >= 0; b--) { // newest on top
         ctx.fillStyle = FIRE_AGES[b].color;
-        ctx.fill(paths[b]); ctx.stroke(paths[b]);
+        ctx.fill(paths[b]);
       }
     },
     // Detections within `px` screen pixels of a container point, nearest first.

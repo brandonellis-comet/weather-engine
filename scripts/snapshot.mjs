@@ -40,7 +40,13 @@ const views = [
     run: async (page) => {
       const ll = await strongestFire(page);
       log.push(`[iphone-fire-tap] fire ${JSON.stringify(ll)}`);
-      if (ll) { await page.evaluate((p) => { window.__we.map.setView(p, 8); }, ll); await page.waitForTimeout(2500); await page.evaluate((p) => window.__we.openPoint(L.latLng(p[0], p[1])), ll); await page.waitForTimeout(7000); }
+      if (ll) { await page.evaluate((p) => { window.__we.map.setView(p, 8); }, ll); await page.waitForTimeout(2500); await page.evaluate((p) => { window.__we.openPoint(L.latLng(p[0], p[1])); }, ll); await page.waitForTimeout(9000); }
+    } },
+  { name: 'iphone-fire-area', engine: 'webkit', device: iphone, main: 'temp', center: [60, -120], zoom: 4, overlays: ['fires', 'cities'], wait: 12000,
+    run: async (page) => {
+      const ll = await page.evaluate(() => { const a = window.__we?.S.hz.areas.data?.areas?.[0]; if (!a) return null; const r = a.polys[0][0]; let x = 0, y = 0; for (const p of r) { x += p[0]; y += p[1]; } return [y / r.length, x / r.length]; });
+      log.push(`[iphone-fire-area] area ${JSON.stringify(ll)}`);
+      if (ll) { await page.evaluate((p) => window.__we.map.setView(p, 9), ll); await page.waitForTimeout(2500); await page.evaluate((p) => { window.__we.openPoint(L.latLng(p[0], p[1])); }, ll); await page.waitForTimeout(8000); }
     } },
   { name: 'iphone-fires-map', engine: 'webkit', device: iphone, main: 'temp', center: [55, -110], zoom: 4, overlays: ['fires', 'cities'], wait: 12000,
     run: async (page) => { const ll = await strongestFire(page); if (ll) { await page.evaluate((p) => window.__we.map.setView(p, 8), ll); await page.waitForTimeout(4000); } } },

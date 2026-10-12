@@ -1054,7 +1054,7 @@ async function renderForecast(lat, lon) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=${VARS}&models=${ms.map((m) => m.id).join(',')}&wind_speed_unit=kmh&timeformat=unixtime&timezone=GMT&forecast_days=7`;
   let j;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout ? AbortSignal.timeout(25000) : undefined });
     j = await res.json();
     if (!res.ok || j.error) throw new Error(j.reason || res.status);
   } catch (e) {
