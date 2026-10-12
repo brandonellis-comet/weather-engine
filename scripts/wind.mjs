@@ -66,22 +66,58 @@ export function targetTimes(ext, now = Date.now()) {
 const iso = (ms) => new Date(ms).toISOString().replace('.000Z', 'Z');
 const fileFor = (ms) => iso(ms).replace(/[-:]/g, '') + '.bin';
 
+export const P_OFFSET = 1000, P_SCALE = 10; // stored Int16 = (hPa − 1000) × 10, −32768 = no data
+
+export function encodePressure(hpa) {
+  const out = Buffer.alloc(hpa.length * 2);
+  for (let i = 0; i < hpa.length; i++) {
+    const x = hpa[i];
+    out.writeInt16LE(Number.isFinite(x) && x > 800 && x < 1100 ? Math.round((x - P_OFFSET) * P_SCALE) : -32768, i * 2);
+  }
+  return out;
+}
+
+// GeoMet may serve MSL pressure in Pa or hPa: normalise to hPa from the grid's median.
+export function toHpa(values) {
+  const sample = [];
+  for (let i = 0; i < values.length; i += 97) if (Number.isFinite(values[i])) sample.push(values[i]);
+  sample.sort((a, b) => a - b);
+  const med = sample[Math.floor(sample.length / 2)] ?? 0;
+  const f = med > 20000 ? 0.01 : 1;
+  const out = new Float32Array(values.length);
+  for (let i = 0; i < values.length; i++) out[i] = values[i] * f;
+  return out;
+}
+
+// Wind (speed + direction) and sea-level pressure for the same forecast hours.
 export async function buildWind({ caps, outDir, pagesUrl, ua, log, status }) {
-  const dir = path.join(outDir, 'wind');
-  await mkdir(dir, { recursive: true });
   const speedL = caps?.find((l) => l.name === 'GDPS_15km_WindSpeed_10m');
   const dirL = caps?.find((l) => l.name === 'GDPS_15km_WindDir_10m');
+  const presL = caps?.find((l) => l.name === 'GDPS_15km_Pressure_MSL')
+    || caps?.find((l) => /^GDPS_15km_/.test(l.name) && /pressure|MSL/i.test(`${l.name} ${l.title}`) && /MSL|sea level/i.test(`${l.name} ${l.title}`) && !/contour|tendency|anom/i.test(l.name));
   if (!speedL || !dirL || !speedL.dims.time) throw new Error('GDPS 10 m wind layers not found in GeoMet catalogue');
   const ext = parseExtent(speedL.dims.time.value);
   // Model run: reference_time if published, else the first forecast hour (= run time).
-  const reference = speedL.dims.reference_time?.default || new Date(ext.start).toISOString().replace('.000Z', 'Z');
+  const reference = speedL.dims.reference_time?.default || iso(ext.start);
   const times = targetTimes(ext);
 
-  let prev = null;
-  if (pagesUrl) {
-    try { const r = await fetch(`${pagesUrl}/data/wind/index.json`, { signal: AbortSignal.timeout(20000) }); if (r.ok) prev = await r.json(); } catch { /* first run */ }
-  }
-  const sameRun = prev && prev.reference === reference && prev.nx;
+  const prevIndex = async (name) => {
+    if (!pagesUrl) return null;
+    try { const r = await fetch(`${pagesUrl}/data/${name}/index.json`, { signal: AbortSignal.timeout(20000) }); return r.ok ? await r.json() : null; } catch { return null; }
+  };
+  const prevW = await prevIndex('wind'), prevP = await prevIndex('pressure');
+  const reuseW = prevW && prevW.reference === reference && prevW.nx ? prevW : null;
+  const reuseP = prevP && prevP.reference === reference && prevP.nx ? prevP : null;
+  const copy = async (product, prev, t, dest) => {
+    const f = prev?.files?.[iso(t)];
+    if (!f) return false;
+    try {
+      const r = await fetch(`${pagesUrl}/data/${product}/${f}`, { signal: AbortSignal.timeout(30000) });
+      if (!r.ok) return false;
+      await writeFile(dest, Buffer.from(await r.arrayBuffer()));
+      return true;
+    } catch { return false; }
+  };
 
   const wcs = async (id, t) => {
     const url = `https://geo.weather.gc.ca/geomet?service=WCS&version=2.0.1&request=GetCoverage&CoverageId=${id}&format=image/tiff&subsettingcrs=EPSG:4326&outputcrs=EPSG:4326&subset=x(-180,180)&subset=y(-90,90)&resolution=x(1)&resolution=y(1)&TIME=${iso(t)}`;
@@ -90,55 +126,81 @@ export async function buildWind({ caps, outDir, pagesUrl, ua, log, status }) {
       const b = Buffer.from(await r.arrayBuffer());
       if (r.status === 429) { await sleep(12000 * (attempt + 1)); continue; }
       if (!r.ok) throw new Error(`HTTP ${r.status} for ${id}`);
-      return readTiff(b);
+      const t2 = readTiff(b);
+      await sleep(PACE_MS);
+      return t2;
     }
     throw new Error(`ECCC kept rate-limiting ${id}`);
   };
 
-  let meta = sameRun ? { nx: prev.nx, ny: prev.ny, lo1: prev.lo1, la1: prev.la1, dx: prev.dx, dy: prev.dy } : null;
-  let fetched = 0, copied = 0, flip = false;
-  const files = {};
+  const wDir = path.join(outDir, 'wind'), pDir = path.join(outDir, 'pressure');
+  await mkdir(wDir, { recursive: true }); await mkdir(pDir, { recursive: true });
+  let meta = reuseW ? { nx: reuseW.nx, ny: reuseW.ny, lo1: reuseW.lo1, la1: reuseW.la1, dx: reuseW.dx, dy: reuseW.dy } : null;
+  const setMeta = (t) => { if (!meta) { const dx = 360 / t.width, dy = 180 / t.height; meta = { nx: t.width, ny: t.height, lo1: -180 + dx / 2, la1: 90 - dy / 2, dx, dy }; } };
+  const wFiles = {}, pFiles = {};
+  const n = { wFetched: 0, wCopied: 0, pFetched: 0, pCopied: 0 };
+  let flip = false, pErr = null;
+
   for (const t of times) {
     const name = fileFor(t);
-    if (sameRun && prev.files?.[iso(t)]) {
-      try {
-        const r = await fetch(`${pagesUrl}/data/wind/${prev.files[iso(t)]}`, { signal: AbortSignal.timeout(30000) });
-        if (r.ok) { await writeFile(path.join(dir, name), Buffer.from(await r.arrayBuffer())); files[iso(t)] = name; copied++; continue; }
-      } catch { /* fall through to ECCC */ }
+    // wind
+    if (await copy('wind', reuseW, t, path.join(wDir, name))) { wFiles[iso(t)] = name; n.wCopied++; }
+    else {
+      const sp = await wcs(speedL.name, t);
+      const dr = await wcs(dirL.name, t);
+      setMeta(sp);
+      const { u, v } = toUV(sp.bands[0], dr.bands[0]);
+      if (n.wFetched === 0 && westerlyCheck(u, meta.nx, meta.la1, meta.dy) < 0) flip = true; // direction is "towards", not "from"
+      if (flip) for (let i = 0; i < u.length; i++) { u[i] = -u[i]; v[i] = -v[i]; }
+      await writeFile(path.join(wDir, name), encode(u, v));
+      wFiles[iso(t)] = name; n.wFetched++;
     }
-    const sp = await wcs(speedL.name, t); await sleep(PACE_MS);
-    const dr = await wcs(dirL.name, t); await sleep(PACE_MS);
-    if (!meta) {
-      const dx = 360 / sp.width, dy = 180 / sp.height;
-      meta = { nx: sp.width, ny: sp.height, lo1: -180 + dx / 2, la1: 90 - dy / 2, dx, dy };
-    }
-    const { u, v } = toUV(sp.bands[0], dr.bands[0]);
-    if (fetched === 0 && westerlyCheck(u, meta.nx, meta.la1, meta.dy) < 0) flip = true; // direction is "towards", not "from"
-    if (flip) for (let i = 0; i < u.length; i++) { u[i] = -u[i]; v[i] = -v[i]; }
-    await writeFile(path.join(dir, name), encode(u, v));
-    files[iso(t)] = name;
-    fetched++;
+    // pressure (optional: wind still publishes if this fails)
+    if (!presL || pErr) continue;
+    if (await copy('pressure', reuseP, t, path.join(pDir, name))) { pFiles[iso(t)] = name; n.pCopied++; continue; }
+    try {
+      const pr = await wcs(presL.name, t);
+      setMeta(pr);
+      await writeFile(path.join(pDir, name), encodePressure(toHpa(pr.bands[0])));
+      pFiles[iso(t)] = name; n.pFetched++;
+    } catch (e) { pErr = String(e.message || e); }
   }
-  const index = { generated: new Date().toISOString(), model: 'GDPS', source: 'ECCC MSC GeoMet (GDPS 10 m wind)', reference, scale: SCALE, ...meta, times: Object.keys(files), files };
-  await writeFile(path.join(dir, 'index.json'), JSON.stringify(index));
-  status.sources.wind = { ok: true, count: index.times.length, note: `${fetched} hours from ECCC, ${copied} reused${flip ? ', direction flipped by check' : ''}`, latest: index.times[index.times.length - 1] };
-  log(`Wind: ${index.times.length} hours (${fetched} fetched, ${copied} reused), run ${reference}`);
-  return index;
+
+  const common = { generated: new Date().toISOString(), model: 'GDPS', reference, ...meta };
+  const wIndex = { ...common, source: 'ECCC MSC GeoMet (GDPS 10 m wind)', scale: SCALE, times: Object.keys(wFiles), files: wFiles };
+  await writeFile(path.join(wDir, 'index.json'), JSON.stringify(wIndex));
+  status.sources.wind = { ok: true, count: wIndex.times.length, note: `${n.wFetched} hours from ECCC, ${n.wCopied} reused${flip ? ', direction flipped by check' : ''}`, latest: wIndex.times.at(-1) };
+
+  if (presL && Object.keys(pFiles).length) {
+    const pIndex = { ...common, source: `ECCC MSC GeoMet (${presL.name})`, units: 'hPa', offset: P_OFFSET, scale: P_SCALE, times: Object.keys(pFiles), files: pFiles };
+    await writeFile(path.join(pDir, 'index.json'), JSON.stringify(pIndex));
+    status.sources.pressure = { ok: !pErr, count: pIndex.times.length, name: presL.name, note: `${n.pFetched} hours from ECCC, ${n.pCopied} reused`, ...(pErr ? { error: pErr } : {}), latest: pIndex.times.at(-1) };
+  } else {
+    status.sources.pressure = { ok: false, error: presL ? (pErr || 'no pressure hours written') : 'GDPS sea-level pressure layer not found' };
+  }
+  log(`Wind: ${wIndex.times.length} hours (${n.wFetched} fetched, ${n.wCopied} reused); pressure: ${Object.keys(pFiles).length} hours (${n.pFetched} fetched); run ${reference}`);
+  return wIndex;
 }
 
-// If ECCC can't be reached this run, republish the last good wind files so the animation stays up.
+// If ECCC can't be reached this run, republish the last good files so the map stays up.
 export async function copyPrevious({ outDir, pagesUrl, status }) {
   if (!pagesUrl) return false;
-  const dir = path.join(outDir, 'wind');
-  await mkdir(dir, { recursive: true });
-  const r = await fetch(`${pagesUrl}/data/wind/index.json`, { signal: AbortSignal.timeout(20000) });
-  if (!r.ok) return false;
-  const prev = await r.json();
-  for (const name of Object.values(prev.files || {})) {
-    const f = await fetch(`${pagesUrl}/data/wind/${name}`, { signal: AbortSignal.timeout(30000) });
-    if (f.ok) await writeFile(path.join(dir, name), Buffer.from(await f.arrayBuffer()));
+  let any = false;
+  for (const product of ['wind', 'pressure']) {
+    try {
+      const dir = path.join(outDir, product);
+      await mkdir(dir, { recursive: true });
+      const r = await fetch(`${pagesUrl}/data/${product}/index.json`, { signal: AbortSignal.timeout(20000) });
+      if (!r.ok) continue;
+      const prev = await r.json();
+      for (const name of Object.values(prev.files || {})) {
+        const f = await fetch(`${pagesUrl}/data/${product}/${name}`, { signal: AbortSignal.timeout(30000) });
+        if (f.ok) await writeFile(path.join(dir, name), Buffer.from(await f.arrayBuffer()));
+      }
+      await writeFile(path.join(dir, 'index.json'), JSON.stringify({ ...prev, stale: true }));
+      if (status.sources[product]) status.sources[product].stale = true;
+      any = true;
+    } catch { /* keep going */ }
   }
-  await writeFile(path.join(dir, 'index.json'), JSON.stringify({ ...prev, stale: true }));
-  if (status.sources.wind) status.sources.wind.stale = true;
-  return true;
+  return any;
 }

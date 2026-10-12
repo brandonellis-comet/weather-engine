@@ -2,6 +2,8 @@
 import { parseMetar, parseTaf, metarToPlain, tafToPlain, tafRawLines } from './decoder.js';
 import { parseExtent, snapTime, isoForWms, fmtZ } from './timeext.js';
 import { createWindLayer, decodeGrid } from './wind.js';
+import { createIsobarLayer, decodePressure, buildIsobars } from './isobars.js';
+import { createCityLayer } from './cities.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -26,19 +28,22 @@ const S = {
   now: Date.now(), offset: 0, playing: false, timer: null,
   view: store.get('view', 'plain'), point: null, tab: 'temp',
   wind: { index: null, cache: new Map(), layer: null, time: null },
+  pres: { index: null, cache: new Map(), layer: null, time: null },
+  legendCollapsed: store.get('legendCollapsed', matchMedia('(max-width: 760px)').matches),
+  cities: { data: null, layer: null, loading: null },
 };
 
 // ---------- map ----------
 const map = L.map('map', { zoomControl: false, worldCopyJump: true, minZoom: 2, maxZoom: 12, preferCanvas: true })
   .setView(store.get('center', [45.6, -63.2]), store.get('zoom', 5));
-L.control.zoom({ position: 'topright' }).addTo(map);
-for (const [name, z] of [['mainPane', 300], ['windPane', 340], ['overlayPane2', 350], ['labelPane', 380], ['stationPane', 450]]) {
+if (matchMedia('(pointer: fine)').matches) L.control.zoom({ position: 'bottomright' }).addTo(map);
+for (const [name, z] of [['mainPane', 300], ['windPane', 340], ['isobarPane', 345], ['overlayPane2', 350], ['labelPane', 380], ['cityPane', 420], ['stationPane', 450]]) {
   map.createPane(name).style.zIndex = z;
 }
 map.getPane('labelPane').style.pointerEvents = 'none';
 map.getPane('mainPane').style.pointerEvents = 'none';
 map.getPane('overlayPane2').style.pointerEvents = 'none';
-map.getPane('windPane').style.pointerEvents = 'none';
+for (const p of ['windPane', 'isobarPane', 'cityPane']) map.getPane(p).style.pointerEvents = 'none';
 
 const bases = {
   osm: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }),
@@ -100,6 +105,8 @@ const FieldLayer = L.Layer.extend({
 });
 const slots = new Map(); // layer id -> { lyr, time, pending }
 const WindLayer = createWindLayer(L);
+const IsobarLayer = createIsobarLayer(L);
+const CityLayer = createCityLayer(L);
 
 // ---------- data ----------
 async function getJson(url) {
@@ -112,9 +119,14 @@ async function loadCore() {
   S.config = await getJson('config/layers.json');
   try { S.catalog = await getJson('data/catalog.json'); } catch { S.catalog = null; }
   try { S.status = await getJson('data/status.json'); } catch { S.status = null; }
-  if (!store.get('overlays', null)) { S.config.layers.filter((l) => l.default).forEach((l) => S.overlays.add(l.id)); S.overlays.add('stations'); }
+  if (!store.get('overlays', null)) S.config.layers.filter((l) => l.default).forEach((l) => S.overlays.add(l.id));
   if (!S.config.layers.some((l) => l.id === S.main && l.group === 'main')) S.main = 'temp';
   if (!store.get('windAdded', false)) { S.overlays.add('wind'); store.set('windAdded', true); store.set('overlays', [...S.overlays]); }
+  // v3: isobars and city names on, airports off by default (cleaner map)
+  if (!store.get('v3defaults', false)) {
+    S.overlays.add('isobars'); S.overlays.add('cities'); S.overlays.delete('stations');
+    store.set('v3defaults', true); store.set('overlays', [...S.overlays]);
+  }
 }
 
 async function loadMetar() {
@@ -240,12 +252,13 @@ let paramTimer = null;
 function applyTime(immediate = false) {
   updateReadout();
   clearTimeout(paramTimer);
-  const run = () => { syncLayers(); syncWind(); renderChips(); };
+  const run = () => { syncLayers(); syncWind(); syncPressure(); syncCities(); renderChips(); renderQuick(); };
   if (immediate) run(); else { renderChips(); paramTimer = setTimeout(run, 220); }
 }
 
+const LOCAL_OVERLAYS = new Set(['stations', 'wind', 'isobars', 'cities']);
 function activeIds() {
-  return [S.main, ...[...S.overlays].filter((id) => id !== 'stations' && id !== 'wind')];
+  return [S.main, ...[...S.overlays].filter((id) => !LOCAL_OVERLAYS.has(id))];
 }
 
 function syncLayers() {
@@ -298,6 +311,55 @@ async function syncWind() {
   if (S.wind.time === t) S.wind.layer.setGrid(grid);
 }
 
+// ---------- isobars ----------
+async function loadPresIndex() {
+  try { S.pres.index = await getJson('data/pressure/index.json'); } catch { S.pres.index = null; }
+}
+function nearestTime(index, t) {
+  const times = index?.times;
+  if (!times?.length) return null;
+  let best = null;
+  for (const s of times) { const ms = Date.parse(s); if (best == null || Math.abs(ms - t) < Math.abs(best - t)) best = ms; }
+  return Math.abs(best - t) <= 3.1 * 3600e3 ? best : null;
+}
+async function syncPressure() {
+  const t = nearestTime(S.pres.index, selectedTime());
+  if (!S.overlays.has('isobars') || t == null) {
+    if (S.pres.layer && map.hasLayer(S.pres.layer)) map.removeLayer(S.pres.layer);
+    S.pres.time = null;
+    return;
+  }
+  if (!S.pres.layer) S.pres.layer = new IsobarLayer();
+  if (!map.hasLayer(S.pres.layer)) S.pres.layer.addTo(map);
+  if (S.pres.time === t) return;
+  S.pres.time = t;
+  const name = S.pres.index.files[new Date(t).toISOString().replace('.000Z', 'Z')];
+  let iso = S.pres.cache.get(name);
+  if (!iso) {
+    try {
+      const res = await fetch(`data/pressure/${name}`);
+      if (!res.ok) throw new Error(res.status);
+      iso = buildIsobars(decodePressure(S.pres.index, await res.arrayBuffer()));
+    } catch { return; }
+    S.pres.cache.set(name, iso);
+    if (S.pres.cache.size > 6) S.pres.cache.delete(S.pres.cache.keys().next().value);
+  }
+  if (S.pres.time === t) S.pres.layer.setData(iso);
+}
+
+// ---------- city names ----------
+async function syncCities() {
+  const on = S.overlays.has('cities');
+  if (!on) { if (S.cities.layer && map.hasLayer(S.cities.layer)) map.removeLayer(S.cities.layer); return; }
+  if (!S.cities.data) {
+    S.cities.loading = S.cities.loading || getJson('data/cities.json').then((j) => (S.cities.data = j.cities)).catch(() => null);
+    await S.cities.loading;
+    if (!S.cities.data || !S.overlays.has('cities')) return;
+  }
+  if (!S.cities.layer) S.cities.layer = new CityLayer(S.cities.data);
+  if (!map.hasLayer(S.cities.layer)) S.cities.layer.addTo(map);
+}
+
 function renderChips() {
   const t = selectedTime();
   const html = activeIds().map((id) => {
@@ -315,7 +377,14 @@ function renderChips() {
       ? `<span class="chip off"><b>Wind animation</b> <span class="t">${S.wind.index ? 'no data for this time' : 'not available yet'}</span></span>`
       : `<span class="chip"><b>Wind animation</b>GDPS · <span class="t">valid ${esc(fmtZd(wt))}</span></span>`;
   }
-  $('#chips').innerHTML = html + wind;
+  let pres = '';
+  if (S.overlays.has('isobars')) {
+    const pt = nearestTime(S.pres.index, t);
+    pres = pt == null
+      ? `<span class="chip off"><b>Isobars</b> <span class="t">${S.pres.index ? 'no data for this time' : 'not available yet'}</span></span>`
+      : `<span class="chip"><b>Isobars</b>GDPS · 4 hPa · <span class="t">valid ${esc(fmtZd(pt))}</span></span>`;
+  }
+  $('#chips').innerHTML = html + wind + pres;
 }
 
 function renderLegend() {
@@ -326,7 +395,8 @@ function renderLegend() {
   const img = src.legend && name
     ? `<img alt="Colour scale for ${esc(def.label)}" onerror="this.remove()" src="${esc(`${src.wms}?service=WMS&version=1.3.0&request=GetLegendGraphic&sld_version=1.1.0&format=image/png&layer=${encodeURIComponent(name)}`)}">`
     : '';
-  el.innerHTML = `<b>${esc(def.label)}</b><div>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</div>${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}`;
+  el.innerHTML = `<button type="button" class="legend-head" aria-expanded="${!S.legendCollapsed}"><span><b>${esc(def.label)}</b><small>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</small></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5z"/></svg></button><div class="legend-body">${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}</div>`;
+  el.classList.toggle('collapsed', !!S.legendCollapsed);
   el.hidden = false;
 }
 
@@ -341,9 +411,13 @@ function renderRail() {
       <span class="meta">${esc(ok ? def.coverage : 'not in source catalogue this run')}</span></button>`;
   };
   $('#mainList').innerHTML = S.config.layers.filter((l) => l.group === 'main').map((d) => item(d, 'radio')).join('');
-  const stationsDef = { id: 'stations', label: 'METAR stations', coverage: S.metar ? `${S.metar.stations.length.toLocaleString('en-CA')} stations, worldwide` : 'loading…' };
-  const windDef = { id: 'wind', label: 'Wind animation', coverage: S.wind.index ? 'Global · ECCC GDPS 10 m wind' : 'waiting for first wind run' };
-  $('#overlayList').innerHTML = [windDef, ...S.config.layers.filter((l) => l.group === 'overlay'), stationsDef].map((d) => item(d, 'check')).join('');
+  const local = [
+    { id: 'wind', label: 'Wind animation', coverage: S.wind.index ? 'Global · ECCC GDPS 10 m wind' : 'waiting for first wind run' },
+    { id: 'isobars', label: 'Isobars and pressure centres', coverage: S.pres.index ? 'Global · GDPS sea-level pressure, 4 hPa' : 'waiting for first pressure run' },
+    { id: 'cities', label: 'City names', coverage: 'Natural Earth · more appear as you zoom' },
+    { id: 'stations', label: 'Airports (METAR/TAF)', coverage: S.metar ? `${S.metar.stations.length.toLocaleString('en-CA')} stations · shown from regional zoom` : 'loading…' },
+  ];
+  $('#overlayList').innerHTML = [...local.slice(0, 2), ...S.config.layers.filter((l) => l.group === 'overlay'), ...local.slice(2)].map((d) => item(d, 'check')).join('');
   document.querySelectorAll('[data-base]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.base === S.base)));
 }
 
@@ -353,6 +427,19 @@ function onRailClick(ev) {
   if (b.dataset.role === 'radio') { S.main = id; store.set('main', id); }
   else { S.overlays.has(id) ? S.overlays.delete(id) : S.overlays.add(id); store.set('overlays', [...S.overlays]); }
   renderRail(); updateStations(); applyTime(true);
+}
+
+// Quick toggles on the map edge mirror the overlay switches.
+function toggleOverlay(id) {
+  S.overlays.has(id) ? S.overlays.delete(id) : S.overlays.add(id);
+  store.set('overlays', [...S.overlays]);
+  renderRail(); updateStations(); applyTime(true);
+}
+function renderQuick() {
+  document.querySelectorAll('[data-quick]').forEach((b) => {
+    b.setAttribute('aria-pressed', String(S.overlays.has(b.dataset.quick)));
+    if (b.dataset.quick === 'stations') b.title = map.getZoom() < 6 ? 'Airports (zoom in to see them)' : 'Airports';
+  });
 }
 
 function setBase(id) {
@@ -368,7 +455,7 @@ function updateStations() {
   if (!stationLayer) {
     const renderer = L.canvas({ pane: 'stationPane', padding: 0.3 });
     stationLayer = L.layerGroup(S.metar.stations.map((s) => {
-      const m = L.circleMarker([s[1], s[2]], { renderer, radius: 4, weight: 1.5, color: '#0e151c', fillColor: '#e7eef4', fillOpacity: 0.95, pane: 'stationPane' });
+      const m = L.circleMarker([s[1], s[2]], { renderer, radius: 4.5, weight: 2, color: '#0d1218', fillColor: '#ffffff', fillOpacity: 1, pane: 'stationPane' });
       m.on('click', (e) => { L.DomEvent.stopPropagation(e); openStation(s[0]); });
       m.bindTooltip(s[0], { direction: 'top', offset: [0, -4], className: 'station-label' });
       return m;
@@ -702,18 +789,34 @@ function renderStatus() {
 function wire() {
   $('#rail').addEventListener('click', onRailClick);
   document.querySelectorAll('[data-base]').forEach((b) => b.addEventListener('click', () => setBase(b.dataset.base)));
-  $('#railToggle').addEventListener('click', () => {
-    const open = !$('#rail').classList.contains('open');
+  const setRail = (open) => {
     $('#rail').classList.toggle('open', open); $('#railToggle').setAttribute('aria-expanded', String(open));
+    store.set('railOpen', open);
+  };
+  $('#railToggle').addEventListener('click', () => setRail(!$('#rail').classList.contains('open')));
+  if (store.get('railOpen', false) && matchMedia('(min-width: 761px)').matches) setRail(true);
+  $('#quick').addEventListener('click', (e) => { const b = e.target.closest('[data-quick]'); if (b) toggleOverlay(b.dataset.quick); });
+  $('#legend').addEventListener('click', (e) => {
+    if (!e.target.closest('.legend-head')) return;
+    S.legendCollapsed = !S.legendCollapsed; store.set('legendCollapsed', S.legendCollapsed); renderLegend();
   });
+  $('#aboutLink').addEventListener('click', () => $('#aboutDlg').showModal());
+  // Keep map controls, legend and panels clear of the floating time bar.
+  const tb = $('#timebar');
+  const setTb = () => document.documentElement.style.setProperty('--tb-h', `${Math.ceil(tb.getBoundingClientRect().height)}px`);
+  setTb();
+  if ('ResizeObserver' in window) new ResizeObserver(setTb).observe(tb); else addEventListener('resize', setTb);
   $('#timeSlider').addEventListener('input', (e) => { togglePlay(false); S.offset = Math.max(-PAST, Math.min(FUT, round10(toOff(Number(e.target.value))))); applyTime(); });
-  $('#jumps').addEventListener('click', (e) => { const b = e.target.closest('[data-jump]'); if (b) { togglePlay(false); setOffset(Number(b.dataset.jump)); } });
+  $('#timebar').addEventListener('click', (e) => { const b = e.target.closest('[data-jump]'); if (b) { togglePlay(false); setOffset(Number(b.dataset.jump)); } });
   $('#stepBack').addEventListener('click', () => { togglePlay(false); step(-1); });
   $('#stepFwd').addEventListener('click', () => { togglePlay(false); step(1); });
   $('#playBtn').addEventListener('click', () => togglePlay());
   $('#drawerClose').addEventListener('click', closeDrawer);
-  map.on('click', (e) => { $('#rail').classList.remove('open'); openPoint(e.latlng); });
-  map.on('zoomend', updateStations);
+  map.on('click', (e) => {
+    if (matchMedia('(max-width: 760px)').matches && $('#rail').classList.contains('open')) { setRail(false); return; }
+    openPoint(e.latlng);
+  });
+  map.on('zoomend', () => { updateStations(); renderQuick(); });
   map.on('moveend', () => { store.set('center', [map.getCenter().lat, map.getCenter().lng]); store.set('zoom', map.getZoom()); });
   let st;
   $('#searchInput').addEventListener('input', (e) => { clearTimeout(st); st = setTimeout(() => onSearch(e.target.value), 280); });
@@ -747,9 +850,10 @@ async function refresh() {
   try { S.catalog = await getJson('data/catalog.json'); } catch { /* keep last */ }
   try { S.status = await getJson('data/status.json'); } catch { /* keep last */ }
   if (names(S.catalog) !== before) resetLayers();
-  const windRun = S.wind.index?.generated;
-  await loadWindIndex();
+  const windRun = S.wind.index?.generated, presRun = S.pres.index?.generated;
+  await Promise.all([loadWindIndex(), loadPresIndex()]);
   if (S.wind.index?.generated !== windRun) { S.wind.cache.clear(); S.wind.time = null; }
+  if (S.pres.index?.generated !== presRun) { S.pres.cache.clear(); S.pres.time = null; }
   await loadMetar();
   S.taf = null;
   if (stationLayer) { map.removeLayer(stationLayer); stationLayer = null; }
@@ -760,8 +864,8 @@ async function refresh() {
 (async function init() {
   await loadCore();
   setBase(S.base in bases ? S.base : 'osm');
-  await loadWindIndex();
-  renderRail(); renderTicks(); wire(); renderStatus();
+  await Promise.all([loadWindIndex(), loadPresIndex()]);
+  renderRail(); renderTicks(); wire(); renderStatus(); renderQuick();
   applyTime(true);
   await loadMetar();
   renderRail(); updateStations();

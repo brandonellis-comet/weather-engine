@@ -283,11 +283,47 @@ async function checkModels(config, catalog) {
   }
 }
 
+// ---------- 4. City names (Natural Earth, public domain) ----------
+const NE_URLS = [
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_populated_places_simple.geojson',
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_populated_places_simple.geojson',
+];
+export function compactCities(geojson) {
+  const out = [];
+  for (const f of geojson.features || []) {
+    const p = f.properties || {};
+    const name = p.name || p.NAME || p.nameascii;
+    const lat = Number(p.latitude ?? p.LATITUDE ?? f.geometry?.coordinates?.[1]);
+    const lon = Number(p.longitude ?? p.LONGITUDE ?? f.geometry?.coordinates?.[0]);
+    const rank = Number(p.scalerank ?? p.SCALERANK ?? 10);
+    const pop = Number(p.pop_max ?? p.POP_MAX ?? 0);
+    if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    out.push([name, Math.round(lat * 100) / 100, Math.round(lon * 100) / 100, rank, pop]);
+  }
+  out.sort((a, b) => a[3] - b[3] || b[4] - a[4]);
+  return out.map(([n, la, lo, r]) => [n, la, lo, r]);
+}
+async function buildCities() {
+  if (FIX) return;
+  for (const url of NE_URLS) {
+    try {
+      const cities = compactCities(JSON.parse(await getText(url)));
+      if (cities.length < 100) throw new Error('too few places');
+      await writeJson('cities.json', { source: 'Natural Earth (public domain)', cities });
+      status.sources.cities = { ok: true, count: cities.length };
+      return;
+    } catch (e) { status.sources.cities = { ok: false, error: String(e.message || e) }; }
+  }
+  const prev = await previous('cities.json');
+  if (prev) { await writeJson('cities.json', prev); status.sources.cities.stale = true; }
+}
+
 // ---------- main ----------
 export async function main() {
   await mkdir(OUT, { recursive: true });
   const config = JSON.parse(await readFile(path.join(ROOT, 'site/config/layers.json'), 'utf8'));
   await buildAviation();
+  await buildCities();
   const catalog = await buildCatalog(config);
   await checkModels(config, catalog);
   if (!FIX) {

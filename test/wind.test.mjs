@@ -44,3 +44,16 @@ test('target hours: 3-hourly to 48 h, 6-hourly to 120 h, aligned to model steps'
   assert.equal(t.at(-1), '10-16T21');
   assert.equal(t.length, 1 + 17 + 12);
 });
+
+import { encodePressure, toHpa, P_OFFSET, P_SCALE } from '../scripts/wind.mjs';
+import { decodePressure } from '../site/js/isobars.js';
+
+test('pressure: Pa or hPa normalised, encoded to Int16 and back', () => {
+  const pa = new Float32Array(200).fill(101325);
+  assert.ok(Math.abs(toHpa(pa)[0] - 1013.25) < 1e-3);
+  const hpa = new Float32Array([1013.25, 987.4, NaN, 1049.96]);
+  assert.ok(Math.abs(toHpa(hpa)[1] - 987.4) < 1e-4);
+  const buf = encodePressure(hpa);
+  const g = decodePressure({ nx: 4, ny: 1, offset: P_OFFSET, scale: P_SCALE }, new Uint8Array(buf).buffer);
+  assert.deepEqual([...g.p].map((x) => (Number.isNaN(x) ? 'nan' : Math.round(x * 10) / 10)), [1013.3, 987.4, 'nan', 1050]);
+});
