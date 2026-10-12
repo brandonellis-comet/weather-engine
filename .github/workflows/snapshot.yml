@@ -3,7 +3,12 @@ name: Snapshot
 # On demand: screenshots of the live site in a real browser, published to the
 # `snapshots` branch so changes can be checked visually.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      views:
+        description: Comma-separated view names (blank = all)
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -11,7 +16,7 @@ permissions:
 jobs:
   shot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +30,7 @@ jobs:
       - name: Take screenshots
         run: |
           export SITE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
+          export VIEWS="${{ inputs.views }}"
           node scripts/snapshot.mjs
 
       - name: Publish to the snapshots branch

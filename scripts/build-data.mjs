@@ -4,6 +4,7 @@
 //     ECCC GeoMet and NASA GIBS catalogues (handles ECCC layer renames).
 //  3. Checks the Open-Meteo model ids used for the point comparison.
 //  4. Writes site/data/{metar,taf,catalog,status}.json.
+//  5. Wind/pressure grids (wind.mjs) and hazards: fires, fire areas, tropical storms (hazards.mjs).
 // One failing source never stops the others. A failed pull falls back to the
 // copy already published on the site (PAGES_URL) and is marked stale.
 //
@@ -339,6 +340,10 @@ export async function main() {
       log('Wind failed:', e.message);
       try { const { copyPrevious } = await import('./wind.mjs'); await copyPrevious({ outDir: OUT, pagesUrl: PAGES, status }); } catch { /* nothing to reuse */ }
     }
+    try {
+      const { buildHazards } = await import('./hazards.mjs');
+      await buildHazards({ outDir: OUT, pagesUrl: PAGES, ua: UA, log, status });
+    } catch (e) { log('Hazards failed:', e.message); }
   }
   await writeJson('catalog.json', catalog);
   await writeJson('status.json', status);

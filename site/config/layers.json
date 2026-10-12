@@ -65,8 +65,6 @@
     { "id": "lightning", "gridKm": 2.5, "label": "Lightning", "group": "overlay", "kind": "obs", "coverage": "Canada (+250 km)",
       "source": "geomet", "candidates": ["Lightning_2.5km_Density"],
       "match": { "name": "lightning", "all": ["density"] } },
-    { "id": "alerts", "label": "ECCC warnings", "group": "overlay", "kind": "static", "coverage": "Canada",
-      "source": "geomet", "candidates": ["Current-Alerts"], "default": true },
     { "id": "labels", "label": "Coastlines and labels", "group": "overlay", "kind": "static", "coverage": "Global",
       "source": "gibs", "candidates": ["Coastlines_15m", "Reference_Labels_15m"], "combine": true }
   ],

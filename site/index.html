@@ -35,6 +35,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 3h-2.07A7 7 0 0 0 13 5.07V3h-2v2.07A7 7 0 0 0 5.07 11H3v2h2.07A7 7 0 0 0 11 18.93V21h2v-2.07A7 7 0 0 0 18.93 13H21v-2Zm-9 6a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z"/></svg>
           <span class="sr-only">My location</span>
         </button>
+        <button class="fab hz-btn" id="hazardBtn" title="Active hazards">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8 1.6 20.8h20.8L12 2.8Zm0 4.1 7 12.1H5l7-12.1Zm-1 3.6v4.6h2v-4.6h-2Zm0 5.8v2h2v-2h-2Z"/></svg>
+          <span class="badge" hidden></span><span class="sr-only">Active hazards</span>
+        </button>
         <button class="fab fab-text" id="statusBtn" title="Feed status"><span class="dot" id="statusDot"></span><span class="lbl">Feeds</span></button>
         <button class="fab fab-text only-wide" id="aboutBtn">About</button>
       </div>
@@ -47,6 +51,9 @@
         <button type="button" data-quick="wind" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h11a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Wind</span></button>
         <button type="button" data-quick="isobars" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="3.2" ry="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><ellipse cx="12" cy="12" rx="6.8" ry="5.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2 12c0-5 4.5-9 10-9s10 4 10 9-4.5 9-10 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Isobars</span></button>
         <button type="button" data-quick="radar" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12 19 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg><span>Radar</span></button>
+        <button type="button" data-quick="alerts" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.5v5M12 16.6v1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Alerts</span></button>
+        <button type="button" data-quick="fires" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c.6 3.2-1.4 4.9-3 6.7C7.3 11.1 6 13 6 15.4 6 18.8 8.7 21.5 12 21.5s6-2.7 6-6.1c0-2.3-1.1-4.2-2.6-5.6.1 1.6-.5 2.8-1.6 3.4.4-3.9-.9-7-1.8-9.2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Fires</span></button>
+        <button type="button" data-quick="tropical" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 4.5c-4.4 0-8 3.6-8 8M12 19.5c4.4 0 8-3.6 8-8M7.5 6c1.2-2 3.6-3.3 6.5-3M16.5 18c-1.2 2-3.6 3.3-6.5 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Storms</span></button>
         <button type="button" data-quick="cities" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5-3v14M8 21V4l7 3v14M15 21v-9l6 2v7M2 21h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Cities</span></button>
         <button type="button" data-quick="stations" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15.5v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0v5l-8 5v2l8-2.5V18l-2.2 1.6V21l3.7-1 3.7 1v-1.4L13 18v-5z" fill="currentColor"/></svg><span>Airports</span></button>
       
@@ -67,7 +74,7 @@
           <button type="button" data-base="relief" aria-pressed="false">Relief</button>
         </div>
       </section>
-      <p class="rail-foot">Tap the map for a point forecast. Turn on Airports, then tap an airport for its METAR and TAF. <button type="button" class="linkish" id="aboutLink">About and sources</button></p>
+      <p class="rail-foot">Tap the map for a point forecast and any alerts, fires or storms there. The triangle button lists every active hazard. Turn on Airports, then tap an airport for its METAR and TAF. <button type="button" class="linkish" id="aboutLink">About and sources</button></p>
     </aside>
 
 
@@ -130,7 +137,8 @@
         <li>Every source has a published reuse licence.</li>
         <li>No DND/CAF METOC products.</li>
         <li>ECCC first. Other agencies fill gaps or serve for comparison.</li>
-        <li>ECCC warnings are shown as ECCC publishes them, unaltered.</li>
+        <li>ECCC alerts are shown as ECCC publishes them, unaltered.</li>
+        <li>No military sources (for example, no Joint Typhoon Warning Center).</li>
       </ol>
       <h3>Sources and licences</h3>
       <ul class="src-list">
@@ -140,9 +148,13 @@
         <li><strong>NASA GIBS</strong>: global satellite imagery, sea surface temperature, satellite rain estimate, Blue Marble relief.</li>
         <li><strong>OpenStreetMap</strong>: street base map. © OpenStreetMap contributors, ODbL.</li>
         <li><strong>Natural Earth</strong>: city names and positions. Public domain.</li>
+        <li><strong>ECCC weather alerts</strong>: read live from ECCC's open alert service (api.weather.gc.ca), text shown as published. Colour and type meanings quoted from canada.ca.</li>
+        <li><strong>Natural Resources Canada, Canadian Wildland Fire Information System</strong>: Canadian fire areas (M3, estimated from satellite hotspots) and fire weather at hotspots. Open Government Licence – Canada.</li>
+        <li><strong>NASA FIRMS</strong>: satellite fire detections worldwide, VIIRS 375 m (Suomi NPP, NOAA-20, NOAA-21), last 24 hours. NASA open data; acknowledgement: NASA LANCE FIRMS.</li>
+        <li><strong>NOAA National Hurricane Center</strong>: active storms, forecast cone, track and points. US Government public data. ECCC Canadian Hurricane Centre track and cone are used instead when it is tracking the storm.</li>
       </ul>
       <h3>How it stays current</h3>
-      <p>A scheduled job runs every 30 minutes. It pulls METAR/TAF, looks up the current ECCC and NASA layer names and times, checks every feed, and republishes this site. The <em>Feeds</em> button shows the last check.</p>
+      <p>A scheduled job runs every 30 minutes. It pulls METAR/TAF, fire detections, Canadian fire areas and tropical storms, looks up the current ECCC and NASA layer names and times, checks every feed, and republishes this site. ECCC alerts are read live by the page every 5 minutes. The <em>Feeds</em> button shows the last check.</p>
     </div>
   </dialog>
 

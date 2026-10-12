@@ -4,6 +4,10 @@ import { parseExtent, snapTime, isoForWms, fmtZ } from './timeext.js';
 import { createWindLayer, decodeGrid } from './wind.js';
 import { createIsobarLayer, decodePressure, buildIsobars } from './isobars.js';
 import { createCityLayer } from './cities.js';
+import {
+  ALERTS_API, CWFIS_WFS, LIST_PROPS, RISK, TYPE, PROVINCES, FUELS, FIRE_AGES, SATS, groupAlerts, isActive, inGeom, inPolys,
+  riskOf, typeOf, decodeFires, createFireLayer, summariseFires, stormCat, ktToKmh, buildTropicalLayer, buildAreaLayer, stormsAt,
+} from './hazards.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -31,6 +35,12 @@ const S = {
   pres: { index: null, cache: new Map(), layer: null, time: null },
   legendCollapsed: store.get('legendCollapsed', matchMedia('(max-width: 760px)').matches),
   cities: { data: null, layer: null, loading: null },
+  hz: {
+    alerts: { list: null, at: 0, error: null, shapes: null, shapesAt: 0, layer: null, stmt: new Map(), stmtLayer: null, selLayer: null },
+    fires: { meta: null, data: null, layer: null, loading: null },
+    areas: { data: null, layer: null },
+    trop: { data: null, layer: null },
+  },
 };
 
 // ---------- map ----------
@@ -38,13 +48,14 @@ const map = L.map('map', { zoomControl: false, worldCopyJump: true, minZoom: 2, 
   .setView(store.get('center', [45.6, -63.2]), store.get('zoom', 5));
 if (matchMedia('(pointer: fine)').matches) L.control.zoom({ position: 'bottomright' }).addTo(map);
 map.attributionControl.setPrefix(false);
-for (const [name, z] of [['mainPane', 300], ['windPane', 340], ['isobarPane', 345], ['overlayPane2', 350], ['labelPane', 380], ['cityPane', 420], ['stationPane', 450]]) {
+for (const [name, z] of [['mainPane', 300], ['stmtPane', 333], ['alertPane', 335], ['windPane', 340], ['isobarPane', 345], ['overlayPane2', 350],
+  ['hazardPane', 352], ['firePane', 354], ['alertSelPane', 356], ['labelPane', 380], ['cityPane', 420], ['stationPane', 450]]) {
   map.createPane(name).style.zIndex = z;
 }
 map.getPane('labelPane').style.pointerEvents = 'none';
 map.getPane('mainPane').style.pointerEvents = 'none';
 map.getPane('overlayPane2').style.pointerEvents = 'none';
-for (const p of ['windPane', 'isobarPane', 'cityPane']) map.getPane(p).style.pointerEvents = 'none';
+for (const p of ['windPane', 'isobarPane', 'cityPane', 'stmtPane', 'alertPane', 'hazardPane', 'firePane', 'alertSelPane']) map.getPane(p).style.pointerEvents = 'none';
 
 const bases = {
   osm: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }),
@@ -108,6 +119,7 @@ const slots = new Map(); // layer id -> { lyr, time, pending }
 const WindLayer = createWindLayer(L);
 const IsobarLayer = createIsobarLayer(L);
 const CityLayer = createCityLayer(L);
+const FireLayer = createFireLayer(L);
 
 // ---------- data ----------
 async function getJson(url) {
@@ -127,6 +139,11 @@ async function loadCore() {
   if (!store.get('v3defaults', false)) {
     S.overlays.add('isobars'); S.overlays.add('cities'); S.overlays.delete('stations');
     store.set('v3defaults', true); store.set('overlays', [...S.overlays]);
+  }
+  // v4: ECCC alerts drawn from the live alert feed, tropical storms on
+  if (!store.get('v4defaults', false)) {
+    S.overlays.add('alerts'); S.overlays.add('tropical');
+    store.set('v4defaults', true); store.set('overlays', [...S.overlays]);
   }
 }
 
@@ -200,7 +217,7 @@ function stepMinutes(dir) {
 }
 
 // ---------- layers ----------
-const opacityOf = (def) => (def.group === 'main' ? 0.8 : def.id === 'alerts' ? 0.5 : 0.92);
+const opacityOf = (def) => (def.group === 'main' ? 0.8 : 0.92);
 function makeWms(def, time) {
   const e = entryOf(def.id);
   const src = S.config.sources[e?.source || def.source];
@@ -261,11 +278,11 @@ let paramTimer = null;
 function applyTime(immediate = false) {
   updateReadout();
   clearTimeout(paramTimer);
-  const run = () => { syncLayers(); syncWind(); syncPressure(); syncCities(); renderChips(); renderQuick(); };
+  const run = () => { syncLayers(); syncWind(); syncPressure(); syncCities(); syncHazards(); renderChips(); renderQuick(); };
   if (immediate) run(); else { renderChips(); paramTimer = setTimeout(run, 220); }
 }
 
-const LOCAL_OVERLAYS = new Set(['stations', 'wind', 'isobars', 'cities']);
+const LOCAL_OVERLAYS = new Set(['stations', 'wind', 'isobars', 'cities', 'alerts', 'fires', 'tropical']);
 function activeIds() {
   return [S.main, ...[...S.overlays].filter((id) => !LOCAL_OVERLAYS.has(id))];
 }
@@ -369,6 +386,406 @@ async function syncCities() {
   if (!map.hasLayer(S.cities.layer)) S.cities.layer.addTo(map);
 }
 
+// ---------- hazards: ECCC alerts ----------
+const ALERT_REFRESH = 5 * MIN;
+const fmtWhen = (iso) => (iso ? fmtLocal(Date.parse(iso)) : '—');
+const provName = (p) => PROVINCES[p] || p || '';
+const wxLink = (prov) => `https://weather.gc.ca/warnings/index_e.html${prov ? `?prov=${encodeURIComponent(prov.toLowerCase())}` : ''}`;
+
+async function loadAlertList(force = false) {
+  const A = S.hz.alerts;
+  if (!force && A.list && Date.now() - A.at < ALERT_REFRESH) return;
+  try {
+    const j = await getJson(`${ALERTS_API}?f=json&limit=1000&skipGeometry=true&properties=${LIST_PROPS}`);
+    A.list = j.features || []; A.at = Date.now(); A.error = null;
+  } catch (e) { A.error = String(e.message || e); }
+  renderHazardBtn(); renderChips();
+}
+async function loadAlertShapes(force = false) {
+  const A = S.hz.alerts;
+  if (!force && A.shapes && Date.now() - A.shapesAt < ALERT_REFRESH) return;
+  if (A.shapesLoading) return A.shapesLoading;
+  A.shapesLoading = (async () => {
+    const res = await Promise.allSettled(['warning', 'watch', 'advisory'].map((t) => getJson(`${ALERTS_API}?f=json&limit=500&alert_type=${t}&properties=${LIST_PROPS}`)));
+    if (res.some((r) => r.status === 'fulfilled')) {
+      A.shapes = res.flatMap((r) => (r.status === 'fulfilled' ? r.value.features || [] : [])).filter((f) => isActive(f.properties));
+      A.shapesAt = Date.now();
+      A.stmt.clear();
+    }
+  })().finally(() => { A.shapesLoading = null; });
+  return A.shapesLoading;
+}
+function alertStyle(f) {
+  const st = typeOf(f.properties) === 'statement', r = RISK[riskOf(f.properties)];
+  return { color: r.line, weight: st ? 1.3 : 1.6, opacity: 0.95, dashArray: st ? '6 4' : null, fillColor: r.fill, fillOpacity: st ? 0.1 : 0.32, interactive: false };
+}
+async function syncAlerts() {
+  const A = S.hz.alerts;
+  if (!S.overlays.has('alerts')) {
+    for (const k of ['layer', 'stmtLayer']) if (A[k] && map.hasLayer(A[k])) map.removeLayer(A[k]);
+    return;
+  }
+  await loadAlertShapes();
+  if (!S.overlays.has('alerts') || !A.shapes) return;
+  if (A.layer?._at !== A.shapesAt) {
+    if (A.layer) map.removeLayer(A.layer);
+    const feats = [...A.shapes].sort((a, b) => RISK[riskOf(a.properties)].rank - RISK[riskOf(b.properties)].rank);
+    A.layer = L.geoJSON({ type: 'FeatureCollection', features: feats }, { pane: 'alertPane', style: alertStyle, interactive: false });
+    A.layer._at = A.shapesAt;
+  }
+  if (!map.hasLayer(A.layer)) A.layer.addTo(map);
+  loadStatements();
+}
+// Special weather statements cover large areas, so they are drawn only when zoomed in,
+// for the part of the map in view.
+let stmtTimer = null;
+function loadStatements() {
+  clearTimeout(stmtTimer);
+  stmtTimer = setTimeout(async () => {
+    const A = S.hz.alerts;
+    if (!S.overlays.has('alerts') || map.getZoom() < 6) { if (A.stmtLayer && map.hasLayer(A.stmtLayer)) map.removeLayer(A.stmtLayer); return; }
+    const b = map.getBounds();
+    const bbox = [Math.max(-180, b.getWest()), Math.max(-90, b.getSouth()), Math.min(180, b.getEast()), Math.min(90, b.getNorth())].map((v) => v.toFixed(3)).join(',');
+    let j; try { j = await getJson(`${ALERTS_API}?f=json&limit=200&alert_type=statement&bbox=${bbox}&properties=${LIST_PROPS}`); } catch { return; }
+    let added = false;
+    for (const f of j.features || []) if (isActive(f.properties) && !A.stmt.has(f.id)) { A.stmt.set(f.id, f); added = true; }
+    if (added || !A.stmtLayer || A.stmtLayer._at !== A.shapesAt) {
+      if (A.stmtLayer) map.removeLayer(A.stmtLayer);
+      A.stmtLayer = L.geoJSON({ type: 'FeatureCollection', features: [...A.stmt.values()] }, { pane: 'stmtPane', style: alertStyle, interactive: false });
+      A.stmtLayer._at = A.shapesAt;
+    }
+    if (S.overlays.has('alerts') && map.getZoom() >= 6 && !map.hasLayer(A.stmtLayer)) A.stmtLayer.addTo(map);
+  }, 350);
+}
+function highlight(features) {
+  const A = S.hz.alerts;
+  if (A.selLayer) { map.removeLayer(A.selLayer); A.selLayer = null; }
+  if (!features?.length) return null;
+  const fc = { type: 'FeatureCollection', features };
+  A.selLayer = L.layerGroup([
+    L.geoJSON(fc, { pane: 'alertSelPane', style: { color: '#ffffff', weight: 5.5, opacity: 0.95, fill: false, interactive: false } }),
+    L.geoJSON(fc, { pane: 'alertSelPane', style: { color: '#0d1218', weight: 2.4, opacity: 1, fill: false, interactive: false } }),
+  ]).addTo(map);
+  return A.selLayer.getLayers()[0].getBounds();
+}
+
+// ---------- hazards: fires and storms ----------
+async function loadFires() {
+  const F = S.hz.fires;
+  try {
+    const meta = await getJson('data/fires.json');
+    if (F.meta?.generated === meta.generated && F.data) return;
+    const res = await fetch(`data/${meta.file || 'fires.bin'}?v=${encodeURIComponent(meta.generated)}`);
+    if (!res.ok) throw new Error(res.status);
+    F.data = decodeFires(meta, await res.arrayBuffer()); F.meta = meta;
+  } catch { /* keep the last copy */ }
+}
+async function loadAreas() { try { S.hz.areas.data = await getJson('data/fire-areas.json'); } catch { /* keep */ } }
+async function loadTropical() { try { S.hz.trop.data = await getJson('data/tropical.json'); } catch { /* keep */ } renderHazardBtn(); renderLegend(); renderChips(); }
+
+async function syncFires() {
+  const F = S.hz.fires, A = S.hz.areas;
+  if (!S.overlays.has('fires')) { for (const l of [F.layer, A.layer]) if (l && map.hasLayer(l)) map.removeLayer(l); return; }
+  if (!F.data) {
+    F.loading = F.loading || Promise.all([loadFires(), loadAreas()]).finally(() => { F.loading = null; });
+    await F.loading;
+    if (!S.overlays.has('fires')) return;
+    renderChips();
+  }
+  if (A.data && A.layer?._src !== A.data) { if (A.layer) map.removeLayer(A.layer); A.layer = buildAreaLayer(L, A.data.areas); A.layer._src = A.data; }
+  if (A.layer && !map.hasLayer(A.layer)) A.layer.addTo(map);
+  if (!F.data) return;
+  if (!F.layer) F.layer = new FireLayer({ pane: 'firePane' });
+  if (F.layer._d !== F.data) F.layer.setData(F.data);
+  if (!map.hasLayer(F.layer)) F.layer.addTo(map);
+}
+async function syncTropical() {
+  const T = S.hz.trop;
+  if (!S.overlays.has('tropical')) { if (T.layer && map.hasLayer(T.layer)) map.removeLayer(T.layer); return; }
+  if (!T.data) { await loadTropical(); if (!S.overlays.has('tropical') || !T.data) return; }
+  if (T.layer?._src !== T.data) { if (T.layer) map.removeLayer(T.layer); T.layer = buildTropicalLayer(L, T.data.storms); T.layer._src = T.data; }
+  if (!map.hasLayer(T.layer)) T.layer.addTo(map);
+}
+function syncHazards() { syncAlerts(); syncFires(); syncTropical(); }
+
+// ---------- hazards: list, button, key ----------
+function hazardCounts() {
+  const groups = groupAlerts(S.hz.alerts.list || []);
+  const alerts = groups.filter((g) => g.type !== 'statement');
+  return { groups, alerts, statements: groups.filter((g) => g.type === 'statement'), storms: S.hz.trop.data?.storms || [] };
+}
+function renderHazardBtn() {
+  const b = $('#hazardBtn'); if (!b) return;
+  const { alerts, storms } = hazardCounts();
+  const n = alerts.length + storms.length;
+  const badge = b.querySelector('.badge');
+  badge.textContent = n > 99 ? '99+' : String(n);
+  badge.hidden = !n;
+  b.dataset.risk = alerts[0]?.risk || (storms.length ? 'storm' : '');
+  b.title = `Active hazards: ${alerts.length} ECCC alert${alerts.length === 1 ? '' : 's'}, ${storms.length} tropical storm${storms.length === 1 ? '' : 's'}`;
+}
+const swatch = (k) => `<i class="sw" style="background:${RISK[k].fill};border-color:${RISK[k].line}"></i>`;
+function hazardKeyHtml() {
+  const rows = [];
+  if (S.overlays.has('alerts')) rows.push(`<div class="key-row"><b>ECCC alerts</b>${['red', 'orange', 'yellow'].map((k) => `<span>${swatch(k)}${RISK[k].label}</span>`).join('')}<span><i class="sw dash"></i>Statement</span></div>`);
+  if (S.overlays.has('fires')) rows.push(`<div class="key-row"><b>Fires</b>${FIRE_AGES.map((a) => `<span><i class="fd" style="background:${a.color}"></i>${a.label.replace('under ', '&lt;')}</span>`).join('')}<span><i class="sw area"></i>Fire area</span></div>`);
+  if (S.overlays.has('tropical') && (S.hz.trop.data?.storms || []).length) rows.push(`<div class="key-row"><b>Storms</b><span><i class="sw cone"></i>Forecast cone</span>${[30, 50, 70, 100, 140].map((kt) => { const c = stormCat(kt); return `<span><i class="fd" style="background:${c.color}"></i>${c.code === 'TD' ? 'D' : c.code === 'TS' ? 'S' : c.code}</span>`; }).join('')}</div>`);
+  return rows.length ? `<div class="hz-keys">${rows.join('')}</div>` : '';
+}
+function hazardChips() {
+  const later = S.offset !== 0 ? ' · now, not forecast' : '';
+  const out = [];
+  if (S.overlays.has('alerts')) {
+    const A = S.hz.alerts, n = hazardCounts().alerts.length;
+    out.push(`<span class="chip${A.error ? ' warn' : ''}${later ? ' off' : ''}"><b>ECCC alerts</b>live · <span class="t">${A.list ? `${n} active` : A.error ? 'not answering' : 'loading'}${later}</span></span>`);
+  }
+  if (S.overlays.has('fires')) {
+    const m = S.hz.fires.meta;
+    out.push(`<span class="chip${later ? ' off' : ''}"><b>Fires</b>NASA FIRMS · <span class="t">${m ? `24 h to ${esc(fmtZ(Date.parse(m.generated)))}` : 'loading'}${later}</span></span>`);
+  }
+  if (S.overlays.has('tropical')) {
+    const st = S.hz.trop.data?.storms;
+    out.push(`<span class="chip${later ? ' off' : ''}"><b>Storms</b>NHC · <span class="t">${st ? (st.length ? `${st.length} active` : 'none active') : 'loading'}${later}</span></span>`);
+  }
+  return out.join('');
+}
+
+function alertItemHtml(g, i) {
+  const r = RISK[g.risk], t = TYPE[g.type];
+  const rk = g.type === 'statement' ? 'Statement' : `${r.label} ${t.label.toLowerCase()}`;
+  return `<button type="button" class="hz-item" data-alert="${i}" style="--rk:${r.fill};--rl:${r.line}">
+    <span class="hz-bar"></span>
+    <span class="hz-main"><b>${esc(g.name)}</b><span class="hz-meta">${esc(rk)} · ${esc(provName(g.province))} · ${g.regions.length} area${g.regions.length === 1 ? '' : 's'}</span>
+    <span class="hz-meta">${g.expires ? `Expires ${esc(fmtWhen(g.expires))}` : `Issued ${esc(fmtWhen(g.issued))}`}</span></span></button>`;
+}
+function keyDetailsHtml() {
+  return `<details class="hz-key"><summary>What the colours and alert types mean</summary>
+    <dl class="plain">${['red', 'orange', 'yellow'].map((k) => `<dt>${swatch(k)}${RISK[k].label}</dt><dd>${esc(RISK[k].meaning)}</dd>`).join('')}
+    ${Object.values(TYPE).map((t) => `<dt>${esc(t.label)}</dt><dd>${esc(t.meaning)}</dd>`).join('')}</dl>
+    <p class="note">ECCC picks the colour from expected impact and forecaster confidence. Wording from canada.ca/weather-alerts.</p></details>`;
+}
+
+async function openHazards() {
+  S.point = null; highlight(null);
+  openDrawer('Active hazards', 'Checking ECCC alerts…');
+  S.drawer = 'hazards';
+  renderHazards();
+  await Promise.all([loadAlertList(), S.hz.trop.data ? null : loadTropical(), S.hz.fires.data ? null : Promise.all([loadFires(), loadAreas()])]);
+  if (S.drawer === 'hazards') renderHazards();
+}
+function renderHazards() {
+  const A = S.hz.alerts, body = $('#drawerBody');
+  const { alerts, statements, storms } = hazardCounts();
+  S.hzGroups = [...alerts, ...statements];
+  $('#drawerSub').textContent = A.at ? `ECCC alerts checked ${new Intl.DateTimeFormat('en-CA', { hour: '2-digit', minute: '2-digit', hour12: false }).format(A.at)} · tap an item for details` : (A.error ? 'ECCC alert feed not answering' : 'Checking ECCC alerts…');
+  const alertList = A.list == null
+    ? `<p class="${A.error ? 'err' : 'loading'}">${A.error ? `The ECCC alert feed didn't answer (${esc(A.error)}). Try again in a few minutes, or check weather.gc.ca.` : 'Loading…'}</p>`
+    : `${alerts.length ? alerts.map((g, i) => alertItemHtml(g, i)).join('') : '<p class="note">No warnings, watches or advisories in effect.</p>'}
+       ${statements.length ? `<h4 class="hz-sub">Special weather statements · information only</h4>${statements.map((g, i) => alertItemHtml(g, alerts.length + i)).join('')}` : ''}`;
+  const F = S.hz.fires, areas = S.hz.areas.data?.areas || [];
+  let inView = 0;
+  if (F.data) { const b = map.getBounds(); for (let i = 0; i < F.data.n; i++) { const la = F.data.gy[i] / F.data.grid, lo = F.data.gx[i] / F.data.grid; if (b.contains([la, lo])) inView += F.data.cnt[i]; } }
+  body.innerHTML = `
+    <section>
+      <div class="sec-h"><h3>ECCC weather alerts</h3><span class="aside">${alerts.length} in effect</span></div>
+      <div class="hz-list">${alertList}</div>
+      ${keyDetailsHtml()}
+      <p class="note">Source: Environment and Climate Change Canada, read live. Text is shown as ECCC publishes it. Official alerts: <a href="${wxLink('')}" target="_blank" rel="noopener">weather.gc.ca</a>.</p>
+    </section>
+    <section>
+      <div class="sec-h"><h3>Tropical storms</h3><span class="aside">${storms.length} active</span></div>
+      <div class="hz-list">${storms.length ? storms.map((s, i) => { const c = stormCat(s.kt); return `<button type="button" class="hz-item" data-storm="${i}" style="--rk:${c.color};--rl:#0d1218"><span class="hz-bar"></span><span class="hz-main"><b>${esc(s.label)} ${esc(s.name)}</b><span class="hz-meta">${esc(c.label)}${s.kt != null ? ` · ${ktToKmh(s.kt)} km/h (${s.kt} kt)` : ''}${s.mb ? ` · ${s.mb} hPa` : ''}</span><span class="hz-meta">${s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center'}${s.updated ? ` · ${esc(fmtWhen(s.updated))}` : ''}</span></span></button>`; }).join('') : '<p class="note">No active tropical cyclones in the Atlantic or eastern and central Pacific (NOAA NHC).</p>'}</div>
+    </section>
+    <section>
+      <div class="sec-h"><h3>Wildfires</h3><span class="aside">${S.overlays.has('fires') ? '' : '<button type="button" class="linkish" data-show-fires>Show on map</button>'}</span></div>
+      ${F.meta ? `<p class="hz-stat"><b>${F.meta.detections.toLocaleString('en-CA')}</b> satellite fire detections worldwide in the last 24 h${F.data ? `, <b>${inView.toLocaleString('en-CA')}</b> in the current view` : ''}.</p>` : '<p class="loading">Loading fire data…</p>'}
+      ${S.hz.areas.data ? `<p class="hz-stat"><b>${areas.length}</b> active fire area${areas.length === 1 ? '' : 's'} in Canada (hotspots in the last 7 days).</p>
+        <div class="hz-list">${areas.slice(0, 8).map((a, i) => `<button type="button" class="hz-item" data-area="${i}" style="--rk:#ff6a2b;--rl:#c2410c"><span class="hz-bar"></span><span class="hz-main"><b>About ${a.ha != null ? a.ha.toLocaleString('en-CA') : '?'} ha</b><span class="hz-meta">Last hotspot ${esc(fmtDay(a.last))} · first ${esc(fmtDay(a.first))}</span></span></button>`).join('')}</div>` : ''}
+      <p class="note">Detections: NASA FIRMS (VIIRS, 375 m). Fire areas: Canadian Wildland Fire Information System (Natural Resources Canada), estimated from satellite hotspots. Not official fire perimeters.</p>
+    </section>`;
+}
+const fmtDay = (iso) => (iso ? new Intl.DateTimeFormat('en-CA', { day: 'numeric', month: 'short' }).format(Date.parse(iso)) : '—');
+
+function onDrawerClick(e) {
+  const a = e.target.closest('[data-alert]');
+  if (a) return openAlert(S.hzGroups[Number(a.dataset.alert)], true);
+  const st = e.target.closest('[data-storm]');
+  if (st) return openStorm(Number(st.dataset.storm));
+  const ar = e.target.closest('[data-area]');
+  if (ar) {
+    const area = S.hz.areas.data?.areas?.[Number(ar.dataset.area)];
+    if (area) {
+      if (!S.overlays.has('fires')) toggleOverlay('fires');
+      map.fitBounds(L.latLngBounds(area.polys.flatMap((p) => p[0].map(([x, y]) => [y, x]))), { maxZoom: 10, padding: [40, 40] });
+    }
+    return;
+  }
+  if (e.target.closest('[data-show-fires]')) { if (!S.overlays.has('fires')) toggleOverlay('fires'); setTimeout(() => S.drawer === 'hazards' && renderHazards(), 1500); return; }
+  if (e.target.closest('[data-back]')) return openHazards();
+  const ga = e.target.closest('[data-open-group]');
+  if (ga) {
+    const k = ga.dataset.openGroup;
+    const g = groupAlerts(S.hz.alerts.list || []).find((x) => x.key === k) || (S.pointGroups || []).find((x) => x.key === k);
+    if (g) openAlert(g, false);
+  }
+}
+
+function alertBanner(g) {
+  const r = RISK[g.risk], t = TYPE[g.type];
+  const lab = g.type === 'statement' ? 'Special weather statement' : `${r.label} ${t.label}`;
+  return `<div class="alert-banner" style="--rk:${r.fill};--ink:${r.ink}"><span>${esc(lab)}</span><b>${esc(g.name)}</b></div>`;
+}
+const alertTextHtml = (text) => `<div class="report"><div class="report-head"><b>ECCC alert text</b><span>as published</span></div><pre class="alert-text">${esc(text)}</pre></div>`;
+
+async function openAlert(g, fromList) {
+  if (!g) return;
+  S.point = null; S.drawer = 'alert';
+  openDrawer(g.name, `${g.type === 'statement' ? 'Special weather statement' : `${RISK[g.risk].label} ${TYPE[g.type].label.toLowerCase()}`} · ${provName(g.province)}`);
+  const r = RISK[g.risk], t = TYPE[g.type];
+  $('#drawerBody').innerHTML = `
+    ${fromList ? '<button type="button" class="linkish back" data-back>← All hazards</button>' : ''}
+    <section>
+      ${alertBanner(g)}
+      <dl class="plain alert-dl">
+        ${g.type !== 'statement' ? `<dt>Colour</dt><dd>${swatch(g.risk)}<b>${esc(r.label)}</b>: ${esc(r.meaning)}</dd>` : ''}
+        <dt>Type</dt><dd><b>${esc(t.label)}</b>: ${esc(t.meaning)}</dd>
+        ${g.impact ? `<dt>Impact</dt><dd>${esc(cap1(g.impact))}</dd>` : ''}
+        ${g.confidence ? `<dt>Confidence</dt><dd>${esc(cap1(g.confidence))}</dd>` : ''}
+        <dt>Issued</dt><dd>${esc(fmtWhen(g.issued))}</dd>
+        <dt>Expires</dt><dd>${esc(fmtWhen(g.expires))}</dd>
+        <dt>Areas (${g.regions.length})</dt><dd><ul class="areas">${g.regions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>
+      </dl>
+    </section>
+    <section id="alertText"><p class="loading">Loading the alert text from ECCC…</p></section>
+    <p class="note">Source: Environment and Climate Change Canada. Contains information licenced under the Data Server End-use Licence of ECCC. Official alert: <a href="${wxLink(g.province)}" target="_blank" rel="noopener">weather.gc.ca warnings, ${esc(provName(g.province) || 'Canada')}</a>.</p>`;
+  const ids = g.ids.slice(0, 60);
+  const res = await Promise.allSettled(ids.map((id) => getJson(`${ALERTS_API}/${encodeURIComponent(id)}?f=json`)));
+  if (S.drawer !== 'alert' || $('#drawerTitle').textContent !== g.name) return;
+  const feats = res.filter((x) => x.status === 'fulfilled' && x.value?.geometry).map((x) => x.value);
+  const b = highlight(feats);
+  if (b?.isValid()) map.fitBounds(b, { maxZoom: 9, padding: [30, 30], paddingBottomRight: matchMedia('(max-width: 760px)').matches ? [20, 20] : [460, 20] });
+  const text = feats.find((f) => f.properties?.alert_text_en)?.properties.alert_text_en || g.text;
+  const sec = $('#alertText');
+  if (sec) sec.innerHTML = text ? alertTextHtml(text) : '<p class="err">The alert text did not load. Use the weather.gc.ca link below.</p>';
+}
+const cap1 = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+
+function stormHtml(s, compact) {
+  const c = stormCat(s.kt);
+  const mv = s.dir != null && s.mph != null ? `${compassFull(s.dir)} at ${Math.round(s.mph * 1.609)} km/h` : null;
+  const pts = (s.points || []).filter((p) => p.tau > 0);
+  return `<article class="hz-card" style="--rk:${c.color};--rl:#0d1218">
+    <div class="hz-card-h"><span class="rk-pill" style="background:${c.color};color:#0d1218">${esc(c.code === 'TD' || c.code === 'TS' ? c.code : `Cat ${c.code}`)}</span><b>${esc(s.label)} ${esc(s.name)}</b></div>
+    <dl class="plain">
+      ${s.kt != null ? `<dt>Max wind</dt><dd>${ktToKmh(s.kt)} km/h (${s.kt} kt), ${esc(c.label.toLowerCase())}</dd>` : ''}
+      ${s.mb ? `<dt>Pressure</dt><dd>${s.mb} hPa</dd>` : ''}
+      ${s.lat != null ? `<dt>Centre</dt><dd>${Math.abs(s.lat).toFixed(1)}°${s.lat >= 0 ? 'N' : 'S'} ${Math.abs(s.lon).toFixed(1)}°${s.lon >= 0 ? 'E' : 'W'}</dd>` : ''}
+      ${mv ? `<dt>Moving</dt><dd>${esc(mv)}</dd>` : ''}
+      ${s.updated ? `<dt>Updated</dt><dd>${esc(fmtWhen(s.updated))}</dd>` : ''}
+      <dt>Forecast</dt><dd>${s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center'}</dd>
+    </dl>
+    ${!compact && pts.length ? `<table class="fc tc"><thead><tr><th>Forecast</th><th>Strength</th><th>Wind</th></tr></thead><tbody>${pts.map((p) => { const pc = stormCat(p.kt); return `<tr><td>${esc(p.when || (p.tau != null ? `+${p.tau} h` : ''))}</td><td><i class="fd" style="background:${pc.color}"></i>${esc(pc.label)}</td><td>${p.kt != null ? `${ktToKmh(p.kt)} km/h` : '–'}</td></tr>`; }).join('')}</tbody></table>` : ''}
+    <p class="note">The cone shows where the centre will probably track. Wind, rain and surge often reach well outside it.${s.advisory ? ` <a href="${esc(s.advisory)}" target="_blank" rel="noopener">Official NHC advisory</a>.` : ''} For storms threatening Canada: <a href="https://weather.gc.ca/hurricane/index_e.html" target="_blank" rel="noopener">Canadian Hurricane Centre</a>.</p>
+  </article>`;
+}
+const compassFull = (d) => ({ N: 'north', NNE: 'north-northeast', NE: 'northeast', ENE: 'east-northeast', E: 'east', ESE: 'east-southeast', SE: 'southeast', SSE: 'south-southeast', S: 'south', SSW: 'south-southwest', SW: 'southwest', WSW: 'west-southwest', W: 'west', WNW: 'west-northwest', NW: 'northwest', NNW: 'north-northwest' }[compass(d)] || '');
+
+function openStorm(i) {
+  const s = S.hz.trop.data?.storms?.[i]; if (!s) return;
+  S.point = null; S.drawer = 'storm'; highlight(null);
+  if (!S.overlays.has('tropical')) toggleOverlay('tropical');
+  openDrawer(`${s.label} ${s.name}`, s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center');
+  $('#drawerBody').innerHTML = `<button type="button" class="linkish back" data-back>← All hazards</button>${stormHtml(s, false)}`;
+  const ll = [[s.lat, s.lon], ...(s.points || []).map((p) => [p.lat, p.lon]), ...(s.cone || []).flatMap((poly) => poly[0].map(([x, y]) => [y, x]))].filter(([a, b]) => a != null && b != null);
+  if (ll.length) map.fitBounds(L.latLngBounds(ll), { maxZoom: 7, padding: [30, 30], paddingBottomRight: matchMedia('(max-width: 760px)').matches ? [20, 20] : [460, 20] });
+}
+
+// Hazards at a tapped point: alerts (live), storms and fires (published data),
+// plus CWFIS fire weather at the nearest Canadian hotspot.
+async function renderPointHazards(lat, lon, pt) {
+  const sec = $('#hzSec'); if (!sec) return;
+  const same = () => S.point?.lat === lat && S.point?.lon === lon && $('#hzSec');
+  const st = { alerts: '', storms: '', fires: '' };
+  const draw = () => { if (!same()) return; const html = st.alerts + st.storms + st.fires; sec.innerHTML = html ? `<div class="sec-h"><h3>Hazards here</h3></div>${html}` : ''; sec.hidden = !html; };
+  if (S.overlays.has('tropical')) st.storms = stormsAt(S.hz.trop.data?.storms, lat, lon, pt, (ll) => map.latLngToContainerPoint(ll)).map((s) => stormHtml(s, true)).join('');
+  let fire = null, area = null;
+  if (S.overlays.has('fires')) {
+    const F = S.hz.fires;
+    fire = F.data && F.layer ? summariseFires(F.data, F.layer.hits(pt, 14).map((h) => h.i)) : null;
+    area = (S.hz.areas.data?.areas || []).find((a) => inPolys(a.polys, lon, lat)) || null;
+    if (fire || area) st.fires = fireHtml(fire, area);
+  }
+  draw();
+  const jobs = [];
+  if (S.overlays.has('alerts')) jobs.push((async () => {
+    const e = 0.0005;
+    try {
+      const j = await getJson(`${ALERTS_API}?f=json&limit=50&bbox=${lon - e},${lat - e},${lon + e},${lat + e}`);
+      const feats = (j.features || []).filter((f) => isActive(f.properties) && inGeom(f.geometry, lon, lat));
+      if (!same()) return;
+      highlight(feats);
+      S.pointGroups = groupAlerts(feats);
+      st.alerts = S.pointGroups.map((g) => `<article class="hz-card" style="--rk:${RISK[g.risk].fill};--rl:${RISK[g.risk].line}">
+        ${alertBanner(g)}
+        <p class="hz-meta">${g.expires ? `Expires ${esc(fmtWhen(g.expires))}` : `Issued ${esc(fmtWhen(g.issued))}`} · ${esc(g.regions[0] || provName(g.province))}</p>
+        <p class="hz-mean">${esc(g.type === 'statement' ? TYPE.statement.meaning : RISK[g.risk].meaning)}</p>
+        ${g.text ? `<details><summary>Read the ECCC alert text</summary><pre class="alert-text">${esc(g.text)}</pre></details>` : ''}
+        <button type="button" class="linkish" data-open-group="${esc(g.key)}">All areas and details</button>
+      </article>`).join('');
+    } catch { st.alerts = '<p class="err">The ECCC alert feed did not answer for this point.</p>'; }
+    draw();
+  })());
+  if (fire && lat > 41 && lat < 84 && lon > -142 && lon < -52) jobs.push((async () => {
+    const d = 0.06;
+    const q = new URLSearchParams({
+      service: 'WFS', version: '1.0.0', request: 'GetFeature', typeName: 'public:hotspots_last24hrs', outputFormat: 'application/json', maxFeatures: '60',
+      propertyName: 'lat,lon,rep_date,agency,fuel,fwi,isi,bui,hfi,ros,temp,rh,ws',
+      CQL_FILTER: `lat BETWEEN ${(lat - d).toFixed(3)} AND ${(lat + d).toFixed(3)} AND lon BETWEEN ${(lon - d * 1.6).toFixed(3)} AND ${(lon + d * 1.6).toFixed(3)}`,
+    });
+    try {
+      const j = await getJson(`${CWFIS_WFS}?${q}`);
+      const near = (j.features || []).map((f) => f.properties).filter((p) => p && p.lat != null)
+        .map((p) => ({ p, d: distKm(lat, lon, p.lat, p.lon) })).sort((a, b) => a.d - b.d)[0];
+      if (!near || !same()) return;
+      st.fires = fireHtml(fire, area, near);
+      draw();
+    } catch { /* fire weather is extra; skip quietly */ }
+  })());
+  await Promise.all(jobs);
+}
+function fireHtml(f, area, fw) {
+  const ago = (m) => (m < 90 ? `${Math.round(m)} min` : `${Math.round(m / 6) / 10} h`);
+  const p = fw?.p;
+  const num1 = (v) => (v == null ? '–' : Math.round(v * 10) / 10);
+  return `<article class="hz-card" style="--rk:#ff4a1a;--rl:#7a1d00">
+    <div class="hz-card-h"><span class="rk-pill" style="background:#ff4a1a;color:#fff">Wildfire</span><b>${f ? 'Satellite fire detections' : 'Fire area'}</b></div>
+    <dl class="plain">
+      ${f ? `<dt>Detections</dt><dd>${f.detections} in the last 24 h, within about ${Math.max(1, Math.round(14 * metresPerPx() / 1000))} km</dd>
+      <dt>Latest</dt><dd>${ago(f.newestMin)} ago${f.night ? ', night pass' : ''}</dd>
+      <dt>Strongest</dt><dd>${Math.round(f.frp)} MW fire radiative power (heat output; higher is more intense)</dd>
+      <dt>Confidence</dt><dd>${f.high ? 'High' : 'Nominal'}</dd>
+      <dt>Satellites</dt><dd>${esc(f.satellites.join(', ') || '–')}</dd>` : ''}
+      ${area ? `<dt>Fire area</dt><dd>About ${area.ha != null ? area.ha.toLocaleString('en-CA') : '?'} ha, estimated from hotspots</dd><dt>First hotspot</dt><dd>${esc(fmtDay(area.first))}</dd><dt>Last hotspot</dt><dd>${esc(fmtDay(area.last))}</dd>` : ''}
+    </dl>
+    ${p ? `<h4 class="hz-sub">Fire weather at the nearest Canadian hotspot (${fw.d < 1 ? '<1' : Math.round(fw.d)} km)</h4>
+    <dl class="plain">
+      ${p.fuel ? `<dt>Fuel type</dt><dd>${esc(p.fuel)}${FUELS[p.fuel] ? `: ${esc(FUELS[p.fuel])}` : ''}</dd>` : ''}
+      <dt>Fire Weather Index</dt><dd>${num1(p.fwi)} (expected fire intensity; higher is more intense)</dd>
+      <dt>Spread index (ISI)</dt><dd>${num1(p.isi)}</dd>
+      <dt>Buildup index (BUI)</dt><dd>${num1(p.bui)}</dd>
+      <dt>Head fire intensity</dt><dd>${p.hfi == null ? '–' : Math.round(p.hfi).toLocaleString('en-CA')} kW/m</dd>
+      <dt>Rate of spread</dt><dd>${num1(p.ros)} m/min</dd>
+      ${p.temp != null ? `<dt>Weather</dt><dd>${num1(p.temp)} °C, humidity ${Math.round(p.rh)} %, wind ${Math.round(p.ws)} km/h</dd>` : ''}
+      <dt>Reported</dt><dd>${esc(fmtWhen(p.rep_date))}${p.agency ? ` · ${esc(p.agency)}` : ''}</dd>
+    </dl>` : ''}
+    <p class="note">A detection is a satellite pixel (375 m) much hotter than its surroundings: usually wildfire, sometimes a controlled burn, gas flare or industry. NASA FIRMS; CWFIS (Natural Resources Canada) fire areas and fire weather are model estimates, not official perimeters.</p>
+  </article>`;
+}
+function metresPerPx() {
+  const c = map.getCenter();
+  return (40075016.686 * Math.cos((c.lat * Math.PI) / 180)) / (256 * 2 ** map.getZoom());
+}
+
 function renderChips() {
   const t = selectedTime();
   const html = activeIds().map((id) => {
@@ -393,9 +810,10 @@ function renderChips() {
       ? `<span class="chip off"><b>Isobars</b> <span class="t">${S.pres.index ? 'no data for this time' : 'not available yet'}</span></span>`
       : `<span class="chip"><b>Isobars</b>GDPS · 4 hPa · <span class="t">valid ${esc(fmtZd(pt))}</span></span>`;
   }
-  $('#chips').innerHTML = html + wind + pres;
+  const hz = hazardChips();
+  $('#chips').innerHTML = html + wind + pres + hz;
   const lt = $('#legendTimes');
-  if (lt) lt.innerHTML = html + wind + pres;
+  if (lt) lt.innerHTML = html + wind + pres + hz;
 }
 
 function renderLegend() {
@@ -406,7 +824,7 @@ function renderLegend() {
   const img = src.legend && name
     ? `<img alt="Colour scale for ${esc(def.label)}" onerror="this.remove()" src="${esc(`${src.wms}?service=WMS&version=1.3.0&request=GetLegendGraphic&sld_version=1.1.0&format=image/png&layer=${encodeURIComponent(name)}`)}">`
     : '';
-  el.innerHTML = `<button type="button" class="legend-head" aria-expanded="${!S.legendCollapsed}"><span><b>${esc(def.label)}</b><small>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</small></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5z"/></svg></button><div class="legend-body">${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}<div class="legend-times" id="legendTimes" aria-label="Layer times"></div></div>`;
+  el.innerHTML = `<button type="button" class="legend-head" aria-expanded="${!S.legendCollapsed}"><span><b>${esc(def.label)}</b><small>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</small></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5z"/></svg></button><div class="legend-body">${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}${hazardKeyHtml()}<div class="legend-times" id="legendTimes" aria-label="Layer times"></div></div>`;
   el.classList.toggle('collapsed', !!S.legendCollapsed);
   el.hidden = false;
 }
@@ -427,6 +845,9 @@ function renderRail() {
     { id: 'isobars', label: 'Isobars and pressure centres', coverage: S.pres.index ? 'Global · GDPS sea-level pressure, 4 hPa' : 'waiting for first pressure run' },
     { id: 'cities', label: 'City names', coverage: 'Natural Earth · more appear as you zoom' },
     { id: 'stations', label: 'Airports (METAR/TAF)', coverage: S.metar ? `${S.metar.stations.length.toLocaleString('en-CA')} stations · shown from regional zoom` : 'loading…' },
+    { id: 'alerts', label: 'ECCC weather alerts', coverage: 'Canada · live from ECCC · tap an area for details' },
+    { id: 'fires', label: 'Wildfires', coverage: 'Global satellite detections, last 24 h · Canadian fire areas' },
+    { id: 'tropical', label: 'Tropical storms', coverage: 'Atlantic and Pacific · NOAA NHC, ECCC CHC' },
   ];
   const quickIds = new Set([...document.querySelectorAll('[data-quick]')].map((b) => b.dataset.quick));
   $('#overlayList').innerHTML = [...local, ...S.config.layers.filter((l) => l.group === 'overlay')].filter((d) => !quickIds.has(d.id)).map((d) => item(d, 'check')).join('');
@@ -544,7 +965,7 @@ function openDrawer(title, sub) {
   $('#drawer').hidden = false;
   $('#drawerBody').innerHTML = '';
 }
-function closeDrawer() { $('#drawer').hidden = true; S.point = null; }
+function closeDrawer() { $('#drawer').hidden = true; S.point = null; S.drawer = null; highlight(null); }
 
 async function openStation(id) {
   const s = S.stationIndex.get(id);
@@ -556,13 +977,15 @@ async function openStation(id) {
 async function openPoint(latlng, near) {
   const lat = Math.round(latlng.lat * 1000) / 1000;
   const lon = Math.round(L.Util.wrapNum(latlng.lng, [-180, 180], true) * 1000) / 1000;
-  S.point = { lat, lon };
+  S.point = { lat, lon }; S.drawer = 'point';
+  highlight(null);
   near = near || nearestStation(lat, lon);
   const coord = `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
   openDrawer(near?.d === 0 ? `${near.s[0]}` : 'Point forecast', near?.d === 0 ? `${near.s[3] || 'Station'} · ${coord}` : coord);
   const body = $('#drawerBody');
-  body.innerHTML = `<section id="stnSec"></section><section id="fcSec"><p class="loading">Loading forecasts from GEM, ECMWF and GFS…</p></section>`;
+  body.innerHTML = `<section id="hzSec" hidden></section><section id="stnSec"></section><section id="fcSec"><p class="loading">Loading forecasts from GEM, ECMWF and GFS…</p></section>`;
   if (near) renderStation(near); else $('#stnSec').remove();
+  renderPointHazards(lat, lon, map.latLngToContainerPoint(latlng));
   await renderForecast(lat, lon);
 }
 
@@ -795,7 +1218,7 @@ function renderStatus() {
   const bad = all.filter((v) => !v.ok).length;
   const age = Math.round((Date.now() - Date.parse(st.generated)) / MIN);
   dot.className = `dot ${age > 75 ? 'bad' : bad ? 'warn' : 'ok'}`;
-  const label = (k) => defOf(k)?.label || { metar: 'METAR', taf: 'TAF', stations: 'Station names', geomet: 'ECCC GeoMet catalogue', gibs: 'NASA GIBS catalogue', gem: 'GEM point model', ecmwf: 'ECMWF point model', gfs: 'GFS point model' }[k] || k;
+  const label = (k) => defOf(k)?.label || { metar: 'METAR', taf: 'TAF', stations: 'Station names', geomet: 'ECCC GeoMet catalogue', gibs: 'NASA GIBS catalogue', fires: 'Fire detections (NASA FIRMS)', fireAreas: 'Fire areas (CWFIS)', tropical: 'Tropical storms (NHC)', cities: 'City names', wind: 'Wind grids', pressure: 'Pressure grids', gem: 'GEM point model', ecmwf: 'ECMWF point model', gfs: 'GFS point model' }[k] || k;
   const row = ([k, v]) => `<tr><td>${esc(label(k))}</td><td class="s"><span class="state"><span class="dot ${v.ok ? 'ok' : 'warn'}"></span>${v.ok ? 'OK' : 'Check'}</span></td><td>${v.name || v.id ? `<code>${esc(v.name || v.id)}</code>` : v.count != null ? esc(v.count.toLocaleString('en-CA')) : ''}${v.latest ? `<br><span class="muted">latest ${esc(fmtZ(Date.parse(v.latest)))}</span>` : ''}${v.error || v.warning || v.note ? `<br><span class="muted">${esc(v.error || v.warning || v.note)}</span>` : ''}</td></tr>`;
   $('#statusBody').innerHTML = `
     <p>Last check: <strong>${esc(fmtLocal(Date.parse(st.generated)))}</strong> (${age} min ago). ${bad ? `${bad === 1 ? '1 item needs' : bad + ' items need'} a look.` : 'Everything answered.'}</p>
@@ -831,11 +1254,14 @@ function wire() {
   $('#stepFwd').addEventListener('click', () => { togglePlay(false); step(1); });
   $('#playBtn').addEventListener('click', () => togglePlay());
   $('#drawerClose').addEventListener('click', closeDrawer);
+  $('#drawerBody').addEventListener('click', onDrawerClick);
+  $('#hazardBtn').addEventListener('click', openHazards);
   map.on('click', (e) => {
     if (matchMedia('(max-width: 760px)').matches && $('#rail').classList.contains('open')) { setRail(false); return; }
     openPoint(e.latlng);
   });
   map.on('zoomend', () => { updateStations(); renderQuick(); });
+  map.on('moveend', () => { if (S.overlays.has('alerts')) loadStatements(); });
   map.on('moveend', () => { store.set('center', [map.getCenter().lat, map.getCenter().lng]); store.set('zoom', map.getZoom()); });
   let st;
   $('#searchInput').addEventListener('input', (e) => { clearTimeout(st); st = setTimeout(() => onSearch(e.target.value), 280); });
@@ -873,7 +1299,7 @@ async function refresh() {
   await Promise.all([loadWindIndex(), loadPresIndex()]);
   if (S.wind.index?.generated !== windRun) { S.wind.cache.clear(); S.wind.time = null; }
   if (S.pres.index?.generated !== presRun) { S.pres.cache.clear(); S.pres.time = null; }
-  await loadMetar();
+  await Promise.all([loadMetar(), loadTropical(), S.hz.fires.data ? loadFires() : null, S.hz.areas.data ? loadAreas() : null]);
   S.taf = null;
   if (stationLayer) { map.removeLayer(stationLayer); stationLayer = null; }
   if (atNow) S.offset = 0;
@@ -886,7 +1312,11 @@ async function refresh() {
   await Promise.all([loadWindIndex(), loadPresIndex()]);
   renderRail(); renderTicks(); wire(); renderStatus(); renderQuick();
   applyTime(true);
+  loadAlertList(); loadTropical();
   await loadMetar();
   renderRail(); updateStations();
   setInterval(refresh, 10 * MIN);
+  // Screenshot runs (Snapshot workflow) drive the page through this handle.
+  if (new URLSearchParams(location.search).has('snap')) window.__we = { S, map, openPoint, openHazards, openStorm, openAlert };
+  setInterval(() => { loadAlertList(true).then(() => { renderChips(); if (S.drawer === 'hazards') renderHazards(); }); if (S.overlays.has('alerts')) loadAlertShapes(true).then(syncAlerts); }, ALERT_REFRESH);
 })();
