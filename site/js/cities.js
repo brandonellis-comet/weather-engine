@@ -2,7 +2,7 @@
 // readable over any colour field. More cities appear as you zoom in; labels that
 // would overlap a more important one are skipped. Data: Natural Earth (public domain).
 
-const RANK_FOR_ZOOM = [1, 1, 1, 1, 2, 3, 4, 6, 7, 8, 10, 10, 10]; // max scalerank shown per zoom
+const RANK_FOR_ZOOM = [1, 1, 1, 2, 3, 4, 5, 7, 8, 9, 10, 10, 10]; // max scalerank shown per zoom
 const MAX_LABELS = 140;
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

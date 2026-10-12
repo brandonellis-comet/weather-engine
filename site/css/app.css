@@ -74,7 +74,7 @@ a { color: var(--accent); }
 .city .nm { font: 600 12.5px/1 var(--f-body); color: var(--label-ink); text-shadow: var(--halo); letter-spacing: .01em; }
 .city.major .nm { font-size: 14.5px; font-weight: 700; }
 .city .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--label-ink); box-shadow: 0 0 0 1.5px #fff; }
-.isobar-label > span { transform: translate(-50%, -50%); font: 600 10.5px/1 var(--f-mono); color: var(--label-ink); text-shadow: var(--halo); }
+.isobar-label > span { transform: translate(-50%, -50%); font: 600 11px/1 var(--f-mono); color: var(--label-ink); background: rgb(255 255 255 / .88); padding: 2px 4px; border-radius: 4px; box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
 .pcentre > div { transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; line-height: 1; }
 .pcentre b { font: 800 26px/1 var(--f-display); text-shadow: var(--halo); }
 .pcentre span { font: 600 11px/1.1 var(--f-mono); color: var(--label-ink); text-shadow: var(--halo); }

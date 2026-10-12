@@ -105,7 +105,7 @@ export function smooth(line, passes = 2) {
 
 // Highs and lows: grid points that are the extreme within `radius` cells and stand
 // at least `minDiff` hPa above/below the mean of that window. Polar rows are skipped.
-export function pressureCentres(g, radius = 7, minDiff = 2.5) {
+export function pressureCentres(g, radius = 8, minDiff = 4) {
   const { nx, ny, p } = g;
   const found = [];
   for (let j = radius; j < ny - radius; j++) {
@@ -156,38 +156,74 @@ export function buildIsobars(g, interval = INTERVAL) {
 
 export function createIsobarLayer(L) {
   return L.Layer.extend({
-    options: { pane: 'isobarPane' },
+    options: { pane: 'isobarPane', maxLabels: 60 },
     initialize(opts) { L.setOptions(this, opts); this._data = null; },
-    setData(data) { this._data = data; if (this._map) this._draw(); },
+    setData(data) { this._data = data; if (this._map) { this._drawLines(); this._drawLabels(); } },
     onAdd(map) {
       this._map = map;
-      this._group = L.layerGroup().addTo(map);
+      this._lines = L.layerGroup().addTo(map);
+      this._labels = L.layerGroup().addTo(map);
       this._renderer = L.canvas({ pane: this.options.pane, padding: 0.5 });
-      map.on('zoomend', this._draw, this);
-      this._draw();
+      map.on('moveend', this._drawLabels, this);
+      this._drawLines(); this._drawLabels();
     },
     onRemove(map) {
-      map.off('zoomend', this._draw, this);
-      this._group.remove(); this._group = null; this._map = null;
+      map.off('moveend', this._drawLabels, this);
+      this._lines.remove(); this._labels.remove(); this._map = null;
     },
-    _draw() {
-      const g = this._group, d = this._data, map = this._map;
-      if (!g || !map) return;
+    _drawLines() {
+      const g = this._lines, d = this._data;
+      if (!g) return;
       g.clearLayers();
       if (!d) return;
-      const z = map.getZoom(), renderer = this._renderer, pane = this.options.pane;
+      const renderer = this._renderer, pane = this.options.pane;
       for (const ln of d.lines) {
         // light halo under a dark line: readable on both pale and dark colour layers
         L.polyline(ln.latlngs, { renderer, pane, color: '#ffffff', weight: 3.4, opacity: 0.55, interactive: false, smoothFactor: 1.2 }).addTo(g);
         L.polyline(ln.latlngs, { renderer, pane, color: '#121a22', weight: ln.level === 1012 ? 1.8 : 1.2, opacity: 0.9, interactive: false, smoothFactor: 1.2 }).addTo(g);
       }
-      if (z >= 3) {
-        for (const lb of d.labels) {
-          L.marker(lb.latlng, { pane, interactive: false, keyboard: false, icon: L.divIcon({ className: 'isobar-label', html: lb.text, iconSize: null }) }).addTo(g);
-        }
-      }
+    },
+    // Label every isobar that is on screen (middle of its visible stretch), skip overlaps.
+    _drawLabels() {
+      const map = this._map, g = this._labels, d = this._data;
+      if (!map || !g) return;
+      g.clearLayers();
+      if (!d) return;
+      const pane = this.options.pane;
+      const view = map.getBounds().pad(-0.06);
+      const size = map.getSize();
+      const placed = [];
+      const fits = (pt, w, h) => {
+        const box = [pt.x - w / 2, pt.y - h / 2, pt.x + w / 2, pt.y + h / 2];
+        if (box[0] < 0 || box[1] < 0 || box[2] > size.x || box[3] > size.y) return false;
+        if (placed.some((q) => box[0] < q[2] && box[2] > q[0] && box[1] < q[3] && box[3] > q[1])) return false;
+        placed.push(box); return true;
+      };
+      const onScreen = (ll) => {
+        for (const shift of [0, 360, -360]) { const p = L.latLng(ll[0], ll[1] + shift); if (view.contains(p)) return p; }
+        return null;
+      };
+      // centres first so line labels avoid them
       for (const c of d.centres) {
-        L.marker([c.lat, c.lon], { pane, interactive: false, keyboard: false, icon: L.divIcon({ className: `pcentre pc-${c.type}`, html: `<b>${c.type}</b><span>${Math.round(c.value)}</span>`, iconSize: null }) }).addTo(g);
+        const p = onScreen([c.lat, c.lon]);
+        if (!p || !fits(map.latLngToContainerPoint(p), 44, 44)) continue;
+        L.marker(p, { pane, interactive: false, keyboard: false, icon: L.divIcon({ className: `pcentre pc-${c.type}`, html: `<div><b>${c.type}</b><span>${Math.round(c.value)}</span></div>`, iconSize: null }) }).addTo(g);
+      }
+      let count = 0;
+      for (const ln of d.lines) {
+        let run = [];
+        const flush = () => {
+          if (run.length >= 3 && count < this.options.maxLabels) {
+            const p = run[Math.floor(run.length / 2)];
+            if (fits(map.latLngToContainerPoint(p), 38, 18)) {
+              L.marker(p, { pane, interactive: false, keyboard: false, icon: L.divIcon({ className: 'isobar-label', html: `<span>${ln.level}</span>`, iconSize: null }) }).addTo(g);
+              count++;
+            }
+          }
+          run = [];
+        };
+        for (const ll of ln.latlngs) { const p = onScreen(ll); if (p) run.push(p); else flush(); }
+        flush();
       }
     },
   });

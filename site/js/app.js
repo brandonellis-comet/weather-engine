@@ -172,12 +172,20 @@ function resolveTime(def, e, t) {
     return { show: true, param: isoForWms(s, true), label: new Date(s).toISOString().slice(0, 10) + (t > ext.end + 864e5 ? ' (latest)' : '') };
   }
   if (!ext) return { show: true, param: null, label: 'no time sync' };
-  const s = snapTime(ext, t, 'nearest');
+  const s = snapTime(ext, alignTime(t), 'nearest');
   const outside = t < ext.start - 3 * 3600e3 || t > ext.end + 3 * 3600e3;
   return { show: true, param: isoForWms(s, ext.dateOnly), label: `valid ${fmtZd(s)}${outside ? ' (nearest)' : ''}`, ms: s, warn: outside };
 }
 
 const selectedTime = () => S.now + S.offset * MIN;
+// With wind or isobars on, every model layer shows their hour (3-hourly steps), so
+// colours, particles and isobars always describe the same moment.
+function clockIndex() {
+  if (S.overlays.has('wind') && S.wind.index?.times?.length) return S.wind.index;
+  if (S.overlays.has('isobars') && S.pres.index?.times?.length) return S.pres.index;
+  return null;
+}
+function alignTime(t) { const idx = clockIndex(); return (idx && nearestTime(idx, t)) ?? t; }
 // "Mon 00:00Z" when the time is on a different UTC day from now, else "00:00Z".
 const fmtZd = (ms) => (new Date(ms).toISOString().slice(0, 10) === new Date(S.now).toISOString().slice(0, 10)
   ? fmtZ(ms) : `${new Intl.DateTimeFormat('en-CA', { weekday: 'short', timeZone: 'UTC' }).format(ms)} ${fmtZ(ms)}`);
@@ -191,7 +199,7 @@ function stepMinutes(dir) {
 }
 
 // ---------- layers ----------
-const opacityOf = (def) => (def.group === 'main' ? 0.8 : 0.92);
+const opacityOf = (def) => (def.group === 'main' ? 0.8 : def.id === 'alerts' ? 0.5 : 0.92);
 function makeWms(def, time) {
   const e = entryOf(def.id);
   const src = S.config.sources[e?.source || def.source];
@@ -504,6 +512,13 @@ function setOffset(m) {
   applyTime();
 }
 function step(dir) {
+  const idx = clockIndex();
+  if (idx && S.offset >= 0 && !(dir < 0 && S.offset === 0)) {
+    const cur = alignTime(selectedTime());
+    const times = idx.times.map((x) => Date.parse(x)).sort((a, b) => a - b);
+    const next = dir > 0 ? times.find((x) => x > cur + 60e3) : [...times].reverse().find((x) => x < cur - 60e3);
+    if (next != null) return setOffset(Math.max(0, (next - S.now) / MIN));
+  }
   setOffset(S.offset + dir * stepMinutes(dir));
 }
 function togglePlay(force) {
