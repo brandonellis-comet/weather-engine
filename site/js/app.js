@@ -795,7 +795,7 @@ function fireHtml(f, area, fw) {
       ${p.temp != null ? `<dt>Weather</dt><dd>${num1(p.temp)} °C, humidity ${Math.round(p.rh)} %, wind ${Math.round(p.ws)} km/h</dd>` : ''}
       <dt>Reported</dt><dd>${esc(fmtWhen(p.rep_date))}${p.agency ? ` · ${esc(p.agency)}` : ''}</dd>
     </dl>` : ''}
-    <p class="note">A detection is a satellite pixel (375 m) much hotter than its surroundings: usually wildfire, sometimes a controlled burn, gas flare or industry. NASA FIRMS; CWFIS (Natural Resources Canada) fire areas and fire weather are model estimates, not official perimeters.</p>
+    <p class="note">${f ? 'A detection is a satellite pixel (375 m) much hotter than its surroundings: usually wildfire, sometimes a controlled burn, gas flare or industry (NASA FIRMS). ' : ''}${area || p ? 'Fire areas and fire weather are CWFIS (Natural Resources Canada) estimates, not official perimeters or forecasts.' : ''}</p>
   </article>`;
 }
 function metresPerPx() {
