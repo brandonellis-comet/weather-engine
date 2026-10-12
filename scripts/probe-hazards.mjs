@@ -1,86 +1,58 @@
 // One-off diagnostics for hazard sources (run by the Probe workflow).
-// Prints GitHub notices so results show on the run page.
 const UA = 'weather-engine (personal, non-commercial; github.com)';
 const notes = [];
 const note = (s) => { notes.push(s); };
-
-async function get(url, opts = {}) {
-  const r = await fetch(url, { headers: { 'User-Agent': UA, Origin: 'https://example.github.io', ...(opts.headers || {}) }, signal: AbortSignal.timeout(60000) });
+async function get(url) {
+  const r = await fetch(url, { headers: { 'User-Agent': UA, Origin: 'https://example.github.io' }, signal: AbortSignal.timeout(90000) });
   const buf = Buffer.from(await r.arrayBuffer());
-  return { status: r.status, type: r.headers.get('content-type'), acao: r.headers.get('access-control-allow-origin'), text: buf.toString('utf8'), size: buf.length };
+  return { status: r.status, type: r.headers.get('content-type'), acao: r.headers.get('access-control-allow-origin'), enc: r.headers.get('content-encoding'), text: buf.toString('utf8'), size: buf.length };
 }
 const short = (s, n = 260) => s.replace(/\s+/g, ' ').slice(0, n);
-async function probe(label, fn) {
-  try { await fn(); } catch (e) { note(`${label}: ERROR ${String(e.message || e).slice(0, 200)}`); }
-}
-const CW = 'https://cwfis.cfs.nrcan.gc.ca/geoserver';
+async function probe(label, fn) { try { await fn(); } catch (e) { note(`${label}: ERROR ${String(e.message || e).slice(0, 200)}`); } }
+const CW = 'https://cwfis.cfs.nrcan.gc.ca/geoserver/public/wfs';
 
-await probe('alerts select', async () => {
-  const props = 'alert_name_en,alert_type,risk_colour_en,status_en,feature_name_en,province,publication_datetime,expiration_datetime,alert_code,feature_id';
-  const r = await get(`https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=1000&skipGeometry=true&properties=${props}`);
-  const j = JSON.parse(r.text);
-  const f = j.features || [];
-  note(`alerts properties-select: ${r.status} size=${r.size} n=${f.length} keys=${Object.keys(f[0]?.properties || {}).join(',')}`);
-  const st = {}; for (const x of f) st[x.properties.status_en] = (st[x.properties.status_en] || 0) + 1;
-  const texts = new Set();
-  const full = JSON.parse((await get('https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=1000&skipGeometry=true')).text).features;
-  for (const x of full) texts.add(x.properties.alert_text_en);
-  note(`alerts status values=${JSON.stringify(st)} distinct texts=${texts.size} id-sample=${JSON.stringify(f[0]?.id)} code-sample=${f.slice(0, 3).map((x) => x.properties.alert_code).join(',')}`);
-  const withGeom = (await get('https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=1000&properties=alert_type,risk_colour_en,status_en')).size;
-  note(`alerts geometry-only size=${withGeom}`);
-  // a point inside a warning/advisory, for GetFeatureInfo
-  const g = JSON.parse((await get('https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=20&alert_type=advisory')).text).features?.[0];
-  if (g) {
-    let ring = g.geometry.type === 'MultiPolygon' ? g.geometry.coordinates[0][0] : g.geometry.coordinates[0];
-    const lon = ring.reduce((s, p) => s + p[0], 0) / ring.length, lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-    const d = 0.05;
-    const u = `https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetFeatureInfo&layers=Current-Alerts&query_layers=Current-Alerts&crs=EPSG:4326&bbox=${lat - d},${lon - d},${lat + d},${lon + d}&width=11&height=11&i=5&j=5&info_format=application/json&feature_count=10`;
-    const r2 = await get(u);
-    let info = short(r2.text, 300);
-    try { const j2 = JSON.parse(r2.text); info = `n=${j2.features?.length} keys=${Object.keys(j2.features?.[0]?.properties || {}).join(',')} sample=${JSON.stringify(j2.features?.[0]?.properties).slice(0, 700)}`; } catch {}
-    note(`gfi Current-Alerts @${lat.toFixed(2)},${lon.toFixed(2)} (${g.properties.feature_name_en}): ${r2.status} acao=${r2.acao} ${info}`);
-    const r3 = await get(`https://api.weather.gc.ca/collections/weather-alerts/items?f=json&skipGeometry=true&bbox=${lon - d},${lat - d},${lon + d},${lat + d}`);
-    note(`alerts bbox query: ${r3.status} n=${JSON.parse(r3.text).features?.length} size=${r3.size}`);
+await probe('nhc', async () => {
+  const r = await get('https://www.nhc.noaa.gov/CurrentStorms.json');
+  note(`nhc CurrentStorms: ${r.status} acao=${r.acao} size=${r.size} ${short(r.text, 900)}`);
+  const r2 = await get('https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather/MapServer?f=json');
+  let info = short(r2.text, 200);
+  try { const j = JSON.parse(r2.text); info = (j.layers || []).map((l) => `${l.id}:${l.name}`).join(' | ').slice(0, 1500); } catch {}
+  note(`nhc mapserver: ${r2.status} acao=${r2.acao} ${info}`);
+});
+await probe('firms', async () => {
+  for (const f of ['noaa-21-viirs-c2/csv/J2_VIIRS_C2_Global_24h.csv', 'noaa-20-viirs-c2/csv/J1_VIIRS_C2_Global_24h.csv', 'suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_Global_24h.csv']) {
+    const r = await get(`https://firms.modaps.eosdis.nasa.gov/data/active_fire/${f}`);
+    const lines = r.text.split('\n');
+    const conf = {}; for (const l of lines.slice(1)) { const c = l.split(',')[8]; if (c) conf[c] = (conf[c] || 0) + 1; }
+    note(`firms ${f.split('/').pop()}: ${r.status} rows=${lines.length - 1} size=${r.size} conf=${JSON.stringify(conf)} first=${short(lines[1] || '', 140)}`);
   }
 });
-
-await probe('cwfis layers', async () => {
-  for (const ws of ['public', '']) {
-    const base = ws ? `${CW}/${ws}` : CW;
-    const r = await get(`${base}/wms?service=WMS&version=1.3.0&request=GetCapabilities`);
-    const names = [...r.text.matchAll(/<Name>([^<]+)<\/Name>/g)].map((m) => m[1]).filter((n) => /active|fire|ciffc|perim|m3|hotspot/i.test(n));
-    note(`cwfis wms caps ${ws || 'root'}: ${r.status} n=${names.length} ${names.slice(0, 40).join(' ')}`);
-  }
-  for (const t of ['public:m3_polygons_current', 'public:hotspots_last24hrs', 'public:hotspots_24h', 'public:activefires_current', 'public:activefires', 'public:ciffc_activefires']) {
-    const r2 = await get(`${CW}/public/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=${t}&outputFormat=application/json&count=2`);
-    let info = short(r2.text, 160);
-    try { const j = JSON.parse(r2.text); info = `matched=${j.numberMatched ?? j.totalFeatures} geom=${j.features?.[0]?.geometry?.type} props=${JSON.stringify(j.features?.[0]?.properties).slice(0, 600)}`; } catch {}
-    note(`cwfis ${t}: ${r2.status} ${info}`);
-  }
-  const r3 = await get(`${CW}/public/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=public:m3_polygons_current&outputFormat=application/json`);
-  note(`cwfis m3_polygons_current full size=${r3.size}`);
+await probe('cwfis cql', async () => {
+  const since = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
+  const r = await get(`${CW}?service=WFS&version=2.0.0&request=GetFeature&typeNames=public:m3_polygons_current&outputFormat=application/json&CQL_FILTER=${encodeURIComponent(`lastdate >= '${since}'`)}`);
+  let info = short(r.text, 200);
+  try { const j = JSON.parse(r.text); info = `n=${j.features.length} areas=${j.features.map((f) => Math.round(f.properties.area)).slice(0, 12).join(',')}`; } catch {}
+  note(`cwfis m3 since ${since}: ${r.status} acao=${r.acao} size=${r.size} ${info}`);
+  const r2 = await get(`${CW}?service=WFS&version=2.0.0&request=GetFeature&typeNames=public:hotspots_last24hrs&outputFormat=application/json&bbox=54,-127,56,-125,EPSG:4326&count=3`);
+  let i2 = short(r2.text, 200);
+  try { const j = JSON.parse(r2.text); i2 = `n=${j.features.length} geom=${JSON.stringify(j.features[0]?.geometry)}`; } catch {}
+  note(`cwfis hotspots bbox: ${r2.status} acao=${r2.acao} ${i2}`);
+  const r3 = await get(`${CW}?service=WFS&version=2.0.0&request=GetFeature&typeNames=public:hotspots_last24hrs&outputFormat=application/json&propertyName=lat,lon,rep_date,agency&count=2000`);
+  note(`cwfis hotspots slim: ${r3.status} size=${r3.size} enc=${r3.enc}`);
 });
-
-await probe('cwfis files', async () => {
-  for (const u of [
-    'https://cwfis.cfs.nrcan.gc.ca/downloads/activefires/activefires.csv',
-    'https://cwfis.cfs.nrcan.gc.ca/downloads/activefires/',
-    'https://cwfis.cfs.nrcan.gc.ca/datamart/download/activefires',
-    'https://cwfis.cfs.nrcan.gc.ca/datamart/metadata/activefires',
-    'https://cwfis.cfs.nrcan.gc.ca/report/activefires',
-  ]) {
-    const r = await get(u);
-    const links = [...r.text.matchAll(/href="([^"]*(?:activefire|\.csv|\.json|\.zip)[^"]*)"/gi)].map((m) => m[1]).slice(0, 8).join(' ');
-    note(`${u}: ${r.status} ${r.type} size=${r.size} links=${links}`);
+await probe('eccc hurricanes all', async () => {
+  for (const id of ['hurricanes-track-realtime', 'hurricanes-error_cone-realtime', 'hurricanes-cyclone-realtime', 'hurricanes-wind_radii-realtime']) {
+    const r = await get(`https://api.weather.gc.ca/collections/${id}/items?f=json&limit=3`);
+    const j = JSON.parse(r.text);
+    note(`${id}: ${r.status} matched=${j.numberMatched} props=${JSON.stringify(j.features?.[0]?.properties).slice(0, 500)} geom=${j.features?.[0]?.geometry?.type}`);
   }
 });
-
-await probe('ciffc', async () => {
-  for (const u of ['https://ciffc.net/api/v1/fires', 'https://ciffc.net/en/ciffc/public/', 'https://api.ciffc.net/v1/wildfires']) {
-    const r = await get(u);
-    note(`${u}: ${r.status} ${r.type} acao=${r.acao} ${short(r.text, 160)}`);
-  }
+await probe('alerts legend', async () => {
+  const r = await get('https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetLegendGraphic&sld_version=1.1.0&format=application/json&layer=Current-Alerts');
+  note(`alerts legend json: ${r.status} ${r.type} ${short(r.text, 900)}`);
+  const r2 = await get('https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0&request=GetStyles&layers=Current-Alerts');
+  const fills = [...r2.text.matchAll(/(?:Name|Title)>([^<]{1,60})<|"fill">(#[0-9a-fA-F]{6})/g)].map((m) => m[1] || m[2]).slice(0, 60).join(' ');
+  note(`alerts styles: ${r2.status} ${r2.type} size=${r2.size} ${fills.slice(0, 1200)}`);
 });
-
 console.log(notes.join('\n'));
-for (let i = 0; i < notes.length; i += 2) console.log(`::notice title=probe ${i / 2 + 1}::${notes.slice(i, i + 2).join('  ||  ')}`);
+for (let i = 0; i < notes.length; i++) console.log(`::notice title=probe ${i + 1}::${notes[i]}`);
