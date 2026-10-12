@@ -1,0 +1,17 @@
+[iphone-z7] cities: 5
+[iphone-z7] chips: Wind speedGDPS · valid 21:00Z · run 12ZRadar: rain latest 19:48ZWind animationGDPS · valid 21:00ZIsobarsGDPS · 4 hPa · valid 21:00ZECCC alertslive · 4 activeStormsNHC · 1 active
+[iphone-z7] badge: 5
+[iphone-z7] alerts: list=101 shapes=23 stmt=0 err=null
+[iphone-z7] fires: none
+[iphone-z7] storms: Simon cone=1 track=1 pts=8 src=NHC
+[iphone-z7] drawer: 
+[iphone-z7 +24h] chips: Wind speedGDPS · valid Tue 21:00Z · run 12ZRadar: rain observations onlyWind animationGDPS · valid Tue 21:00ZIsobarsGDPS · 4 hPa · valid Tue 21:00ZECCC alertslive · 4 active · now, not forecastStormsNHC · 1 active · now, not forecast
+[iphone-z7] took 28 s
+[desktop-z5] cities: 20
+[desktop-z5] chips: Sea-level pressure GDPS · valid 21:00Z · run 12Z Radar: rain latest 19:48Z Wind animation GDPS · valid 21:00Z Isobars GDPS · 4 hPa · valid 21:00Z ECCC alerts live · 4 active Storms NHC · 1 active
+[desktop-z5] badge: 5
+[desktop-z5] alerts: list=101 shapes=23 stmt=0 err=null
+[desktop-z5] fires: none
+[desktop-z5] storms: Simon cone=1 track=1 pts=8 src=NHC
+[desktop-z5] drawer: 
+[desktop-z5] took 11 s
