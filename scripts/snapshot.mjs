@@ -46,7 +46,7 @@ const views = [
   { name: 'desktop-z5', engine: 'chromium', vp: { width: 1280, height: 800 }, dpr: 1, main: 'pressure', center: [46, -60], zoom: 5, click: '.legend-head' },
 ].filter((v) => !only.length || only.includes(v.name));
 
-for (const v of views) {
+const shoot = async (v) => {
   const ctx = await browsers[v.engine].newContext(v.device ? { ...v.device } : { viewport: v.vp, deviceScaleFactor: v.dpr });
   await ctx.addInitScript((o) => {
     localStorage.setItem('we:main', JSON.stringify(o.main));
@@ -62,7 +62,8 @@ for (const v of views) {
   page.on('pageerror', (e) => log.push(`[${v.name}] pageerror: ${e.message}`));
   page.on('requestfailed', (r) => log.push(`[${v.name}] failed: ${r.url().slice(0, 200)} ${r.failure()?.errorText}`));
   page.on('response', (r) => { if (r.status() >= 400) log.push(`[${v.name}] HTTP ${r.status()}: ${r.url().slice(0, 200)}`); });
-  await page.goto(`${site}?snap=${Date.now()}`, { waitUntil: 'networkidle', timeout: 60000 }).catch((e) => log.push(`goto: ${e.message}`));
+  const t0 = Date.now();
+  await page.goto(`${site}?snap=${Date.now()}`, { waitUntil: 'load', timeout: 45000 }).catch((e) => log.push(`goto: ${e.message}`));
   await page.waitForTimeout(v.wait || 7000);
   if (v.click) { await page.evaluate((sel) => document.querySelector(sel)?.click(), v.click); await page.waitForTimeout(v.after || 2500); }
   if (v.run) await v.run(page).catch((e) => log.push(`[${v.name}] run: ${e.message}`));
@@ -86,7 +87,15 @@ for (const v of views) {
     await page.screenshot({ path: 'shots/iphone-z7-plus24h.png' });
     log.push(`[${v.name} +24h] chips: ${(await page.locator('#chips').innerText()).replace(/\s+/g, ' ')}`);
   }
+  log.push(`[${v.name}] took ${Math.round((Date.now() - t0) / 1000)} s`);
   await ctx.close();
+};
+for (const v of views) {
+  let timer;
+  await Promise.race([shoot(v), new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('view timed out')), 100000); })])
+    .catch((e) => log.push(`[${v.name}] ERROR ${e.message}`));
+  clearTimeout(timer);
+  await writeFile('shots/log.txt', log.join('\n') + '\n');
 }
 await writeFile('shots/log.txt', log.join('\n') + '\n');
 for (const b of Object.values(browsers)) await b.close();

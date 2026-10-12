@@ -1,6 +1,6 @@
 # Weather Engine
 
-Personal weather map built on open data, ECCC first. It has a global map with switchable layers and one time bar that drives every layer. Tap anywhere for a GEM / ECMWF / GFS model comparison. Tap any station for its METAR and TAF, in raw or plain language.
+Personal weather map built on open data, ECCC first. It has a global map with switchable layers and one time bar that drives every layer. Tap anywhere for a GEM / ECMWF / GFS model comparison. Tap any station for its METAR and TAF, in raw or plain language. ECCC alerts, wildfires and tropical storms are on the map with plain-language definitions.
 
 **Not an official forecast or warning service.** For official warnings use [weather.gc.ca](https://weather.gc.ca). For flight planning use NAV CANADA.
 
@@ -24,11 +24,15 @@ After that it updates itself every 30 minutes.
 | Control | What it does |
 |---|---|
 | **Main layer** (left panel, or the layers button on a phone) | One weather field at a time: temperature, wind, gusts, precipitation, pressure, cloud, thunderstorm potential, waves, ocean temperature, air quality, satellite. |
-| **Overlays** | Stack on top of the main layer: radar (rain/snow), lightning, ECCC warnings, coastlines/labels, METAR stations. |
+| **Overlays** | Stack on top of the main layer: radar (rain/snow), lightning, coastlines/labels, METAR stations. |
+| **Alerts** (on by default) | ECCC warnings, watches and advisories drawn in their colour (yellow, orange, red), read live from ECCC every 5 minutes. Special weather statements show as grey dashed areas from regional zoom. |
+| **Fires** | Satellite fire detections worldwide, last 24 h (NASA FIRMS), coloured by age. Canadian fire areas with hotspots in the last 7 days (CWFIS). |
+| **Storms** (on by default) | Active tropical cyclones: position, category, forecast cone, track and points (NOAA NHC; ECCC Canadian Hurricane Centre when it is tracking the storm). |
+| **Triangle button** (top bar) | Every active hazard in one list: ECCC alerts sorted by colour and type, tropical storms, Canadian fire areas. The badge shows the count and the colour of the highest alert. Tap an item for details. |
 | **Wind animation** (overlay, on by default) | Moving particles from ECCC GDPS 10 m wind, synced to the time bar. Global, out to +5 days. |
 | **Time bar** | One clock for every layer. Drag it, step it, press play, or use the jump buttons (−3h to +5d). The past is observations; the future is forecast. |
 | **Chips under the time bar** | Show the time each layer is actually displaying, and the model run. If a layer can't match the selected time, its chip says so (e.g. radar shows *observations only* for future times). |
-| **Tap the map** | Point forecast: GEM vs ECMWF vs GFS, a model-agreement rating, a 7-day temperature chart, and tables for temp, wind, precip, pressure and cloud. Shows the nearest station within 60 km. |
+| **Tap the map** | Hazards at that spot first (alert with its colour, type, meaning and the ECCC text unaltered; fire detections with fire weather at the nearest Canadian hotspot; storm details). Then the point forecast: GEM vs ECMWF vs GFS, a model-agreement rating, a 7-day temperature chart, and tables for temp, wind, precip, pressure and cloud. Shows the nearest station within 60 km. |
 | **Tap a station dot / search an ICAO code** | METAR and TAF with a **Raw / Plain language** toggle. |
 | **Feeds button** | Result of the last automatic check of every source. Green: all good. Amber: something needs a look. Red: no check in over 75 minutes. |
 
@@ -43,7 +47,8 @@ After that it updates itself every 30 minutes.
 2. Every source has a published reuse licence.
 3. No DND/CAF METOC products.
 4. ECCC first. Other agencies only fill gaps or serve for comparison.
-5. ECCC warnings are shown as published (map layer from ECCC, unaltered).
+5. ECCC alerts are shown as published: ECCC's areas and text, unaltered. Colour and type meanings are quoted from canada.ca.
+6. No military sources. Tropical storms come from NOAA NHC (civilian) and ECCC CHC, not the Joint Typhoon Warning Center.
 
 | Source | Used for | Licence |
 |---|---|---|
@@ -52,6 +57,12 @@ After that it updates itself every 30 minutes.
 | NOAA Aviation Weather Center | METAR/TAF worldwide | US Government public data |
 | NASA GIBS | Global satellite IR, true colour, sea surface temperature, satellite rain estimate, Blue Marble relief | NASA open data, attribution shown |
 | OpenStreetMap | Street base map | © OpenStreetMap contributors, ODbL |
+| ECCC weather alerts (api.weather.gc.ca) | Alert areas, colours, types and text, read live by the page | ECCC Data Server End-use Licence |
+| Natural Resources Canada, CWFIS | Canadian fire areas (M3, estimated from hotspots), fire weather at hotspots | Open Government Licence – Canada |
+| NASA FIRMS | Fire detections, VIIRS 375 m (Suomi NPP, NOAA-20, NOAA-21), last 24 h | NASA open data; acknowledgement: NASA LANCE FIRMS |
+| NOAA National Hurricane Center | Active storms, forecast cone, track and points | US Government public data |
+| ECCC Canadian Hurricane Centre | Track and cone when it is tracking a storm | ECCC Data Server End-use Licence |
+| Natural Earth | City names | Public domain |
 
 ## 4. How it stays current
 
@@ -60,8 +71,9 @@ After that it updates itself every 30 minutes.
 1. Runs the decoder and data-job tests.
 2. `scripts/build-data.mjs` pulls METAR/TAF, then reads the **live** ECCC and NASA layer catalogues and resolves each map layer by name and rule. ECCC is mid-way through renaming its GDPS layers (`GDPS.ETA_*` → `GDPS_15km_*`), so names are never hard-coded.
 3. It builds the wind animation grids from ECCC GDPS 10 m wind (GeoMet WCS). Only new forecast hours are requested from ECCC; hours already published for the same model run are reused, and requests are paced because ECCC rate-limits rapid calls.
-4. It checks every feed for age and availability and writes `status.json`. That is the **Feeds** button, and the run's *Summary* page on GitHub.
-5. It republishes the site. If one source fails, the rest still publish, and the failed one keeps its last good copy marked *stale*.
+4. `scripts/hazards.mjs` builds the hazard files: NASA FIRMS detections merged onto a 2 km grid (about 400 KB, binary), CWFIS fire areas active in the last 7 days (simplified), and NHC/CHC storms. ECCC alerts are not built here; the page reads them live.
+5. It checks every feed for age and availability and writes `status.json`. That is the **Feeds** button, and the run's *Summary* page on GitHub.
+6. It republishes the site. If one source fails, the rest still publish, and the failed one keeps its last good copy marked *stale*.
 
 ## 5. Maintenance
 
@@ -77,14 +89,17 @@ After that it updates itself every 30 minutes.
 
 - **Radar** covers Canada and the USA only. No open global radar exists; use *Rain rate (satellite estimate)* elsewhere.
 - **Lightning** covers Canada (+250 km) only.
-- **Warnings** cover Canada only.
+- **Alerts** cover Canada only. Statements are drawn only from regional zoom (they cover large areas).
+- **Fire areas** are CWFIS estimates from satellite hotspots, not official perimeters. Fire name, size and stage of control (CIFFC) have no open feed this site can read.
+- **Fire detections** are satellite pixels that are hotter than their surroundings. Controlled burns, gas flares and industry also show.
+- **Tropical storms** cover NHC's basins (Atlantic, eastern and central Pacific). Western Pacific and Indian Ocean storms are not shown: the open civilian sources there don't publish a machine-readable feed this site uses yet.
 - **Global satellite IR** has no coverage over Europe, Africa or the Indian Ocean. NASA GIBS doesn't carry Meteosat; true colour covers it daily.
 - **Wind animation** uses a 1° grid (about 110 km), so it shows the flow pattern, not local gusts. The colour layers underneath carry the 15 km detail.
 
 ## 7. Roadmap
 
 - **Phase 2: analysis.** An AI watchdog reviews `status.json` and cross-checks layers (radar vs model vs METAR). Anomaly flags against ECCC climate normals. Daily brief.
-- **Phase 3: depth.** Storm and tropical tracking (Canadian Hurricane Centre / NHC), real-time alerts. (Animated wind is done: built by the scheduled job from ECCC GDPS, no home server needed.)
+- **Phase 3: depth.** Done: animated wind, isobars, live ECCC alerts, wildfires, tropical storms. Next: smoothing passes, alert push notifications.
 
 ## Layout
 
@@ -96,10 +111,14 @@ site/                  the published website
   js/decoder.js        METAR/TAF decoder (rule-based)
   js/timeext.js        time snapping shared by site and data job
   js/wind.js           wind particle animation
+  js/isobars.js        isobars and H/L centres
+  js/cities.js         city names
+  js/hazards.js        alerts, fires, storms: map layers and helpers
   config/layers.json   layer definitions: edit layers here
   data/                written by the scheduled job (not committed)
 scripts/build-data.mjs scheduled data job
-scripts/wind.mjs       wind animation grids from ECCC GDPS
+scripts/wind.mjs       wind animation and pressure grids from ECCC GDPS
+scripts/hazards.mjs    fire detections, fire areas, tropical storms
 scripts/tiff.mjs       GeoTIFF reader for ECCC raw data
 scripts/snapshot.mjs   live-site screenshots (Snapshot workflow)
 test/                  decoder, time and data-job tests
