@@ -28,7 +28,7 @@ for (const v of views) {
   page.on('requestfailed', (r) => log.push(`[${v.name}] failed: ${r.url().slice(0, 200)} ${r.failure()?.errorText}`));
   await page.goto(`${site}?snap=${Date.now()}`, { waitUntil: 'networkidle', timeout: 60000 }).catch((e) => log.push(`goto: ${e.message}`));
   await page.waitForTimeout(6000);
-  if (v.click) { await page.click(v.click); await page.waitForTimeout(2500); }
+  if (v.click) { await page.evaluate((sel) => document.querySelector(sel)?.click(), v.click); await page.waitForTimeout(2500); }
   await page.screenshot({ path: `shots/${v.name}.png` });
   const info = await page.evaluate(() => ({
     tiles: [...document.querySelectorAll('.leaflet-tile')].slice(0, 2).map((i) => i.src),
@@ -42,7 +42,7 @@ for (const v of views) {
   log.push(`[${v.name}] chips: ${info.chips}`);
   log.push(`[${v.name}] tiles: ${info.tiles.join(' | ')}`);
   if (v.name === 'phone-z7') {
-    await page.click('[data-jump="1440"]');
+    await page.evaluate(() => document.querySelector('[data-jump="1440"]').click()); // jump buttons are hidden on phones
     await page.waitForTimeout(6000);
     await page.screenshot({ path: 'shots/phone-z7-plus24h.png' });
     log.push(`[${v.name} +24h] chips: ${(await page.locator('#chips').innerText()).replace(/\s+/g, ' ')}`);
