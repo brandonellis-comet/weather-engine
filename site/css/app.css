@@ -174,7 +174,8 @@ a { color: var(--accent); }
 .legend img { display: block; max-height: 170px; background: #fff; border-radius: 4px; }
 .legend .legend-note { margin-top: 4px; }
 .legend-times { display: none; margin-top: 8px; flex-direction: column; gap: 4px; }
-.legend-times .chip { align-self: flex-start; }
+.legend-times .chip { align-self: flex-start; white-space: normal; max-width: 100%; }
+.legend:not(.collapsed) { max-width: min(300px, calc(100% - 2 * var(--gap))); }
 
 /* ---------- time bar ---------- */
 .timebar {
