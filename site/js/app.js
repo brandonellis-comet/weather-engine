@@ -348,6 +348,45 @@ function nearestTime(index, t) {
   for (const s of times) { const ms = Date.parse(s); if (best == null || Math.abs(ms - t) < Math.abs(best - t)) best = ms; }
   return Math.abs(best - t) <= 3.1 * 3600e3 ? best : null;
 }
+// Isobars are built in a worker; if workers are unavailable, on the main thread.
+let isoWorker = null, isoSeq = 0;
+const isoWaiting = new Map();
+function isoBuild(index, buf) {
+  if (isoWorker === null) {
+    try {
+      isoWorker = new Worker(new URL('./isobar-worker.js', import.meta.url), { type: 'module' });
+      isoWorker.onmessage = (e) => { const w = isoWaiting.get(e.data.id); if (!w) return; isoWaiting.delete(e.data.id); e.data.error ? w.reject(new Error(e.data.error)) : w.resolve(e.data.iso); };
+      isoWorker.onerror = () => { isoWorker = false; for (const [, w] of isoWaiting) w.fallback(); isoWaiting.clear(); };
+    } catch { isoWorker = false; }
+  }
+  const local = () => buildIsobars(decodePressure(index, buf.slice(0)));
+  if (!isoWorker) return Promise.resolve(local());
+  return new Promise((resolve, reject) => {
+    const id = ++isoSeq;
+    isoWaiting.set(id, { resolve, reject, fallback: () => { try { resolve(local()); } catch (err) { reject(err); } } });
+    isoWorker.postMessage({ id, index, buf: buf.slice(0) });
+  });
+}
+async function isobarsFor(name) {
+  let iso = S.pres.cache.get(name);
+  if (iso) return iso;
+  iso = S.pres.pending?.get(name);
+  if (iso) return iso;
+  S.pres.pending ||= new Map();
+  const run = S.pres.index.generated;
+  const job = (async () => {
+    const res = await fetch(`data/pressure/${name}`);
+    if (!res.ok) throw new Error(res.status);
+    const built = await isoBuild(S.pres.index, await res.arrayBuffer());
+    if (S.pres.index.generated !== run) return built; // a newer model run arrived meanwhile
+    S.pres.cache.set(name, built);
+    if (S.pres.cache.size > 8) S.pres.cache.delete(S.pres.cache.keys().next().value);
+    return built;
+  })().finally(() => S.pres.pending.delete(name));
+  S.pres.pending.set(name, job);
+  return job;
+}
+
 async function syncPressure() {
   const t = nearestTime(S.pres.index, selectedTime());
   if (!S.overlays.has('isobars') || t == null) {
@@ -360,17 +399,14 @@ async function syncPressure() {
   if (S.pres.time === t) return;
   S.pres.time = t;
   const name = S.pres.index.files[new Date(t).toISOString().replace('.000Z', 'Z')];
-  let iso = S.pres.cache.get(name);
-  if (!iso) {
-    try {
-      const res = await fetch(`data/pressure/${name}`);
-      if (!res.ok) throw new Error(res.status);
-      iso = buildIsobars(decodePressure(S.pres.index, await res.arrayBuffer()));
-    } catch { return; }
-    S.pres.cache.set(name, iso);
-    if (S.pres.cache.size > 6) S.pres.cache.delete(S.pres.cache.keys().next().value);
-  }
+  let iso;
+  try { iso = await isobarsFor(name); } catch { return; }
   if (S.pres.time === t) S.pres.layer.setData(iso);
+  // get the next hour ready in the background, so stepping and playback stay smooth
+  const times = S.pres.index.times.map((x) => Date.parse(x)).sort((a, b) => a - b);
+  const nxt = times.find((x) => x > t);
+  const nn = nxt != null && S.pres.index.files[new Date(nxt).toISOString().replace('.000Z', 'Z')];
+  if (nn && !S.pres.cache.has(nn)) isobarsFor(nn).catch(() => {});
 }
 
 // ---------- city names ----------

@@ -109,6 +109,30 @@ export function smooth(line, passes = 2) {
   return pts;
 }
 
+// Douglas-Peucker in grid cells: drops points that smoothing made redundant, so the
+// map has far fewer points to project on every zoom (iterative: long rings are safe).
+export function simplify(pts, tol = 0.06) {
+  if (pts.length <= 4) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [s, e] = stack.pop();
+    const [ax, ay] = pts[s], [bx, by] = pts[e];
+    const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+    let max = 0, idx = -1;
+    for (let i = s + 1; i < e; i++) {
+      const [px, py] = pts[i];
+      const t = len ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len)) : 0;
+      const d = Math.hypot(px - ax - t * dx, py - ay - t * dy);
+      if (d > max) { max = d; idx = i; }
+    }
+    if (max > tol && idx > 0) { keep[idx] = 1; stack.push([s, idx], [idx, e]); }
+  }
+  const out = pts.filter((_, i) => keep[i]);
+  return out.length >= 3 ? out : pts;
+}
+
 // Highs and lows: grid points that are the extreme within `radius` cells and stand
 // out from the mean of that window by at least minHigh / minLow hPa. Highs are broad
 // and flat, lows are tighter, so highs get the smaller threshold. Polar rows skipped.
@@ -149,7 +173,7 @@ export function buildIsobars(g, interval = INTERVAL) {
   for (let level = Math.ceil(lo / interval) * interval; level <= hi; level += interval) {
     for (const raw of isolines(g.p, g.nx, g.ny, level)) {
       if (raw.length < 4) continue; // drop specks
-      const pts = smooth(raw);
+      const pts = simplify(smooth(raw));
       const latlngs = pts.map(([x, y]) => [g.la1 - y * g.dy, g.lo1 + x * g.dx]);
       lines.push({ level, latlngs });
       if (raw.length >= 10) {
@@ -178,17 +202,21 @@ export function createIsobarLayer(L) {
       map.off('moveend', this._drawLabels, this);
       this._lines.remove(); this._labels.remove(); this._map = null;
     },
+    // Three multi-line layers in all (halo, lines, the 1012 hPa line) rather than two
+    // layers per isobar: far less work for the map on every pan and zoom.
     _drawLines() {
       const g = this._lines, d = this._data;
       if (!g) return;
       g.clearLayers();
       if (!d) return;
-      const renderer = this._renderer, pane = this.options.pane;
-      for (const ln of d.lines) {
-        // light halo under a dark line: readable on both pale and dark colour layers
-        L.polyline(ln.latlngs, { renderer, pane, color: '#ffffff', weight: 3.4, opacity: 0.55, interactive: false, smoothFactor: 1.2 }).addTo(g);
-        L.polyline(ln.latlngs, { renderer, pane, color: '#121a22', weight: ln.level === 1012 ? 1.8 : 1.2, opacity: 0.9, interactive: false, smoothFactor: 1.2 }).addTo(g);
-      }
+      const renderer = this._renderer, pane = this.options.pane, opt = { renderer, pane, interactive: false, smoothFactor: 1.2 };
+      const all = d.lines.map((ln) => ln.latlngs);
+      const std = d.lines.filter((ln) => ln.level !== 1012).map((ln) => ln.latlngs);
+      const ref = d.lines.filter((ln) => ln.level === 1012).map((ln) => ln.latlngs);
+      // light halo under a dark line: readable on both pale and dark colour layers
+      if (all.length) L.polyline(all, { ...opt, color: '#ffffff', weight: 3.4, opacity: 0.55 }).addTo(g);
+      if (std.length) L.polyline(std, { ...opt, color: '#121a22', weight: 1.2, opacity: 0.9 }).addTo(g);
+      if (ref.length) L.polyline(ref, { ...opt, color: '#121a22', weight: 1.8, opacity: 0.9 }).addTo(g);
     },
     // Label every isobar that is on screen (middle of its visible stretch), skip overlaps.
     _drawLabels() {
@@ -207,8 +235,10 @@ export function createIsobarLayer(L) {
         if (placed.some((q) => box[0] < q[2] && box[2] > q[0] && box[1] < q[3] && box[3] > q[1])) return false;
         placed.push(box); return true;
       };
+      const s = view.getSouth(), n = view.getNorth(), w = view.getWest(), e = view.getEast();
       const onScreen = (ll) => {
-        for (const shift of [0, 360, -360]) { const p = L.latLng(ll[0], ll[1] + shift); if (view.contains(p)) return p; }
+        if (ll[0] < s || ll[0] > n) return null;
+        for (const shift of [0, 360, -360]) { const lon = ll[1] + shift; if (lon >= w && lon <= e) return L.latLng(ll[0], lon); }
         return null;
       };
       // centres first so line labels avoid them
