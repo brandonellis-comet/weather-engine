@@ -37,6 +37,7 @@ const S = {
 const map = L.map('map', { zoomControl: false, worldCopyJump: true, minZoom: 2, maxZoom: 12, preferCanvas: true })
   .setView(store.get('center', [45.6, -63.2]), store.get('zoom', 5));
 if (matchMedia('(pointer: fine)').matches) L.control.zoom({ position: 'bottomright' }).addTo(map);
+map.attributionControl.setPrefix(false);
 for (const [name, z] of [['mainPane', 300], ['windPane', 340], ['isobarPane', 345], ['overlayPane2', 350], ['labelPane', 380], ['cityPane', 420], ['stationPane', 450]]) {
   map.createPane(name).style.zIndex = z;
 }
@@ -393,6 +394,8 @@ function renderChips() {
       : `<span class="chip"><b>Isobars</b>GDPS · 4 hPa · <span class="t">valid ${esc(fmtZd(pt))}</span></span>`;
   }
   $('#chips').innerHTML = html + wind + pres;
+  const lt = $('#legendTimes');
+  if (lt) lt.innerHTML = html + wind + pres;
 }
 
 function renderLegend() {
@@ -403,7 +406,7 @@ function renderLegend() {
   const img = src.legend && name
     ? `<img alt="Colour scale for ${esc(def.label)}" onerror="this.remove()" src="${esc(`${src.wms}?service=WMS&version=1.3.0&request=GetLegendGraphic&sld_version=1.1.0&format=image/png&layer=${encodeURIComponent(name)}`)}">`
     : '';
-  el.innerHTML = `<button type="button" class="legend-head" aria-expanded="${!S.legendCollapsed}"><span><b>${esc(def.label)}</b><small>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</small></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5z"/></svg></button><div class="legend-body">${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}</div>`;
+  el.innerHTML = `<button type="button" class="legend-head" aria-expanded="${!S.legendCollapsed}"><span><b>${esc(def.label)}</b><small>${esc(e?.model || def.model || src.label)} · ${esc(def.coverage || '')}</small></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5z"/></svg></button><div class="legend-body">${img}${e?.note ? `<div class="legend-note">${esc(e.note)}</div>` : ''}<div class="legend-times" id="legendTimes" aria-label="Layer times"></div></div>`;
   el.classList.toggle('collapsed', !!S.legendCollapsed);
   el.hidden = false;
 }
@@ -425,7 +428,8 @@ function renderRail() {
     { id: 'cities', label: 'City names', coverage: 'Natural Earth · more appear as you zoom' },
     { id: 'stations', label: 'Airports (METAR/TAF)', coverage: S.metar ? `${S.metar.stations.length.toLocaleString('en-CA')} stations · shown from regional zoom` : 'loading…' },
   ];
-  $('#overlayList').innerHTML = [...local.slice(0, 2), ...S.config.layers.filter((l) => l.group === 'overlay'), ...local.slice(2)].map((d) => item(d, 'check')).join('');
+  const quickIds = new Set([...document.querySelectorAll('[data-quick]')].map((b) => b.dataset.quick));
+  $('#overlayList').innerHTML = [...local, ...S.config.layers.filter((l) => l.group === 'overlay')].filter((d) => !quickIds.has(d.id)).map((d) => item(d, 'check')).join('');
   document.querySelectorAll('[data-base]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.base === S.base)));
 }
 
@@ -813,7 +817,7 @@ function wire() {
   $('#quick').addEventListener('click', (e) => { const b = e.target.closest('[data-quick]'); if (b) toggleOverlay(b.dataset.quick); });
   $('#legend').addEventListener('click', (e) => {
     if (!e.target.closest('.legend-head')) return;
-    S.legendCollapsed = !S.legendCollapsed; store.set('legendCollapsed', S.legendCollapsed); renderLegend();
+    S.legendCollapsed = !S.legendCollapsed; store.set('legendCollapsed', S.legendCollapsed); renderLegend(); renderChips();
   });
   $('#aboutLink').addEventListener('click', () => $('#aboutDlg').showModal());
   // Keep map controls, legend and panels clear of the floating time bar.

@@ -5,11 +5,10 @@
 
 export const INTERVAL = 4;
 
-// Screen area where map labels can be read: not under the search bar, the quick
-// toggles on the right edge, or the time bar at the bottom.
+// Screen area where map labels can be read: not under the search bar or the time bar.
 export function labelArea(size) {
   const tb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--tb-h')) || 120;
-  return [4, 62, size.x - 76, size.y - tb - 24];
+  return [4, 62, size.x - 6, size.y - tb - 24];
 }
 
 export function decodePressure(meta, buf) {

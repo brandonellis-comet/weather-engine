@@ -42,11 +42,22 @@
 
     <aside class="rail card" id="rail" aria-label="Map layers">
       <section>
+        <h2 class="rail-h">Show on map</h2>
+        <div class="quick" id="quick" role="group" aria-label="Show on map">
+        <button type="button" data-quick="wind" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h11a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Wind</span></button>
+        <button type="button" data-quick="isobars" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="3.2" ry="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><ellipse cx="12" cy="12" rx="6.8" ry="5.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2 12c0-5 4.5-9 10-9s10 4 10 9-4.5 9-10 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Isobars</span></button>
+        <button type="button" data-quick="radar" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12 19 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg><span>Radar</span></button>
+        <button type="button" data-quick="cities" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5-3v14M8 21V4l7 3v14M15 21v-9l6 2v7M2 21h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Cities</span></button>
+        <button type="button" data-quick="stations" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15.5v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0v5l-8 5v2l8-2.5V18l-2.2 1.6V21l3.7-1 3.7 1v-1.4L13 18v-5z" fill="currentColor"/></svg><span>Airports</span></button>
+      
+        </div>
+      </section>
+      <section>
         <h2 class="rail-h">Main layer</h2>
         <div class="layer-list" id="mainList" role="radiogroup" aria-label="Main layer"></div>
       </section>
       <section>
-        <h2 class="rail-h">Overlays</h2>
+        <h2 class="rail-h">More overlays</h2>
         <div class="layer-list" id="overlayList"></div>
       </section>
       <section>
@@ -59,13 +70,6 @@
       <p class="rail-foot">Tap the map for a point forecast. Turn on Airports, then tap an airport for its METAR and TAF. <button type="button" class="linkish" id="aboutLink">About and sources</button></p>
     </aside>
 
-    <nav class="quick" id="quick" aria-label="Quick toggles">
-      <button type="button" data-quick="wind" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h11a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Wind</span></button>
-      <button type="button" data-quick="isobars" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="3.2" ry="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><ellipse cx="12" cy="12" rx="6.8" ry="5.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2 12c0-5 4.5-9 10-9s10 4 10 9-4.5 9-10 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Isobars</span></button>
-      <button type="button" data-quick="radar" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12 19 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg><span>Radar</span></button>
-      <button type="button" data-quick="cities" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5-3v14M8 21V4l7 3v14M15 21v-9l6 2v7M2 21h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Cities</span></button>
-      <button type="button" data-quick="stations" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15.5v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0v5l-8 5v2l8-2.5V18l-2.2 1.6V21l3.7-1 3.7 1v-1.4L13 18v-5z" fill="currentColor"/></svg><span>Airports</span></button>
-    </nav>
 
     <div class="legend card" id="legend" hidden></div>
 

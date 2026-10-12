@@ -20,7 +20,7 @@ jobs:
           node-version: 22
 
       - name: Install browser
-        run: npm install --no-save playwright@1.48.2 && npx playwright install --with-deps chromium
+        run: npm install --no-save playwright@1.48.2 && npx playwright install --with-deps chromium webkit
 
       - name: Take screenshots
         run: |

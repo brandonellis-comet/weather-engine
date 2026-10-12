@@ -3,10 +3,14 @@
 // from ECCC GDPS 10 m wind. Particles move at a constant on-screen speed per m/s,
 // so the picture reads the same at every zoom.
 
-const SPEED = 0.11;          // screen px per frame for 1 m/s
-const MAX_AGE = 90;          // frames before a particle respawns
-const FADE = 0.93;           // trail persistence per frame
+// Trails are redrawn from scratch every frame from each particle's last few
+// positions, so nothing builds up on the canvas (fading by over-painting leaves a
+// grainy residue on phone browsers). Motion is time-based: same speed at any frame rate.
+const SPEED = 0.11;          // screen px per 60 Hz frame for 1 m/s
+const MAX_AGE = 110;         // frames (at 60 Hz) before a particle respawns
+const TRAIL = 12;            // positions kept per particle
 const CELL = 5;              // screen-grid cell size for the precomputed field
+const BUCKETS = [0.12, 0.3, 0.55, 0.9]; // trail opacity, oldest to newest
 
 export function createWindLayer(L) {
   return L.Layer.extend({
@@ -63,8 +67,8 @@ export function createWindLayer(L) {
       this._w = size.x; this._h = size.y;
       if (!this._grid) return;
       this._buildField();
-      const n = Math.min(4000, Math.round((size.x * size.y) / 380));
-      this._parts = Array.from({ length: n }, () => this._spawn({}));
+      const n = Math.min(3000, Math.round((size.x * size.y) / 420));
+      this._parts = Array.from({ length: n }, () => this._spawn({ hx: new Float32Array(TRAIL), hy: new Float32Array(TRAIL) }));
       if (!this.options.still) this._start();
       else this._drawStill();
     },
@@ -95,30 +99,46 @@ export function createWindLayer(L) {
 
     _spawn(p) {
       p.x = Math.random() * this._w; p.y = Math.random() * this._h;
-      p.age = Math.floor(Math.random() * MAX_AGE);
+      p.age = Math.random() * MAX_AGE;
+      p.n = 1; p.head = 0; p.hx[0] = p.x; p.hy[0] = p.y; // fresh trail: no line back to the old spot
       return p;
     },
 
     _start() {
       if (this._raf || !this._field || document.hidden) return;
       const ctx = this._ctx;
-      const frame = () => {
-        ctx.globalCompositeOperation = 'destination-in';
-        ctx.fillStyle = `rgba(0,0,0,${FADE})`;
-        ctx.fillRect(0, 0, this._w, this._h);
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.lineWidth = 1.1;
-        ctx.strokeStyle = 'rgba(255,255,255,0.82)';
-        ctx.beginPath();
+      let last = performance.now();
+      const frame = (now) => {
+        const dt = Math.min(3, Math.max(0.25, (now - last) / 16.667));
+        last = now;
+        // advance
         for (const p of this._parts) {
           const v = this._vec(p.x, p.y);
-          if (!v || ++p.age > MAX_AGE) { this._spawn(p); p.age = 0; continue; }
-          const nx = p.x + v[0], ny = p.y + v[1];
-          ctx.moveTo(p.x, p.y); ctx.lineTo(nx, ny);
-          p.x = nx; p.y = ny;
-          if (nx < 0 || ny < 0 || nx > this._w || ny > this._h) this._spawn(p);
+          p.age += dt;
+          if (!v || p.age > MAX_AGE) { this._spawn(p); p.age = 0; continue; }
+          p.x += v[0] * dt; p.y += v[1] * dt;
+          if (p.x < 0 || p.y < 0 || p.x > this._w || p.y > this._h) { this._spawn(p); continue; }
+          p.head = (p.head + 1) % TRAIL; p.hx[p.head] = p.x; p.hy[p.head] = p.y;
+          if (p.n < TRAIL) p.n++;
         }
-        ctx.stroke();
+        // draw: clear, then one stroke per opacity bucket (oldest segments faintest)
+        ctx.clearRect(0, 0, this._w, this._h);
+        ctx.lineWidth = 1.25; ctx.lineCap = 'round';
+        const nb = BUCKETS.length;
+        for (let b = 0; b < nb; b++) {
+          ctx.strokeStyle = `rgba(255,255,255,${BUCKETS[b]})`;
+          ctx.beginPath();
+          for (const p of this._parts) {
+            const segs = p.n - 1;
+            if (segs < 1) continue;
+            // segment k runs from the k-th oldest point to the next; bucket by age
+            for (let k = Math.floor((b * segs) / nb); k < Math.floor(((b + 1) * segs) / nb); k++) {
+              const i0 = (p.head - segs + k + TRAIL) % TRAIL, i1 = (i0 + 1) % TRAIL;
+              ctx.moveTo(p.hx[i0], p.hy[i0]); ctx.lineTo(p.hx[i1], p.hy[i1]);
+            }
+          }
+          ctx.stroke();
+        }
         this._raf = requestAnimationFrame(frame);
       };
       this._raf = requestAnimationFrame(frame);
