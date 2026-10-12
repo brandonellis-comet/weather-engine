@@ -271,13 +271,17 @@ async function checkModels(config, catalog) {
   catalog.models = {};
   for (const [key, m] of Object.entries(config.models)) {
     if (key.startsWith('_')) continue;
-    for (const id of m.candidates) {
-      try {
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=44.8&longitude=-63.6&hourly=temperature_2m&forecast_days=1&models=${id}`;
-        const j = JSON.parse(await getText(url));
-        const series = j.hourly && (j.hourly.temperature_2m || j.hourly[`temperature_2m_${id}`]);
-        if (series && series.some((v) => v != null)) { catalog.models[key] = { id, label: m.label }; break; }
-      } catch { /* try next */ }
+    // Two passes: a single slow or rate-limited answer shouldn't flag the model as down.
+    for (let pass = 0; pass < 2 && !catalog.models[key]; pass++) {
+      if (pass) await new Promise((r) => setTimeout(r, FIX ? 0 : 4000));
+      for (const id of m.candidates) {
+        try {
+          const url = `https://api.open-meteo.com/v1/forecast?latitude=44.8&longitude=-63.6&hourly=temperature_2m&forecast_days=1&models=${id}`;
+          const j = JSON.parse(await getText(url));
+          const series = j.hourly && (j.hourly.temperature_2m || j.hourly[`temperature_2m_${id}`]);
+          if (series && series.some((v) => v != null)) { catalog.models[key] = { id, label: m.label }; break; }
+        } catch { /* try next */ }
+      }
     }
     status.models[key] = catalog.models[key] ? { ok: true, id: catalog.models[key].id } : { ok: false, error: 'no candidate id answered' };
   }

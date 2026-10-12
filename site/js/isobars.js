@@ -5,6 +5,13 @@
 
 export const INTERVAL = 4;
 
+// Screen area where map labels can be read: not under the search bar, the quick
+// toggles on the right edge, or the time bar at the bottom.
+export function labelArea(size) {
+  const tb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--tb-h')) || 120;
+  return [4, 62, size.x - 76, size.y - tb - 24];
+}
+
 export function decodePressure(meta, buf) {
   const n = meta.nx * meta.ny;
   const dv = new DataView(buf);
@@ -104,8 +111,9 @@ export function smooth(line, passes = 2) {
 }
 
 // Highs and lows: grid points that are the extreme within `radius` cells and stand
-// at least `minDiff` hPa above/below the mean of that window. Polar rows are skipped.
-export function pressureCentres(g, radius = 8, minDiff = 4) {
+// out from the mean of that window by at least minHigh / minLow hPa. Highs are broad
+// and flat, lows are tighter, so highs get the smaller threshold. Polar rows skipped.
+export function pressureCentres(g, radius = 10, minHigh = 2, minLow = 3) {
   const { nx, ny, p } = g;
   const found = [];
   for (let j = radius; j < ny - radius; j++) {
@@ -127,8 +135,8 @@ export function pressureCentres(g, radius = 8, minDiff = 4) {
       }
       if (!n) continue;
       const mean = sum / n;
-      if (isMax && v - mean >= minDiff) found.push({ type: 'H', lat, lon: g.lo1 + i * g.dx, value: v });
-      if (isMin && mean - v >= minDiff) found.push({ type: 'L', lat, lon: g.lo1 + i * g.dx, value: v });
+      if (isMax && v - mean >= minHigh) found.push({ type: 'H', lat, lon: g.lo1 + i * g.dx, value: v });
+      if (isMin && mean - v >= minLow) found.push({ type: 'L', lat, lon: g.lo1 + i * g.dx, value: v });
     }
   }
   return found;
@@ -193,9 +201,10 @@ export function createIsobarLayer(L) {
       const view = map.getBounds().pad(-0.06);
       const size = map.getSize();
       const placed = [];
+      const safe = labelArea(size);
       const fits = (pt, w, h) => {
         const box = [pt.x - w / 2, pt.y - h / 2, pt.x + w / 2, pt.y + h / 2];
-        if (box[0] < 0 || box[1] < 0 || box[2] > size.x || box[3] > size.y) return false;
+        if (box[0] < safe[0] || box[1] < safe[1] || box[2] > safe[2] || box[3] > safe[3]) return false;
         if (placed.some((q) => box[0] < q[2] && box[2] > q[0] && box[1] < q[3] && box[3] > q[1])) return false;
         placed.push(box); return true;
       };

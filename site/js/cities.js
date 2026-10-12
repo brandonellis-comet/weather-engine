@@ -5,6 +5,8 @@
 const RANK_FOR_ZOOM = [1, 1, 1, 2, 3, 4, 5, 7, 8, 9, 10, 10, 10]; // max scalerank shown per zoom
 const MAX_LABELS = 140;
 
+import { labelArea } from './isobars.js';
+
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 export function createCityLayer(L) {
@@ -30,6 +32,7 @@ export function createCityLayer(L) {
       const b = map.getBounds().pad(0.05);
       const size = map.getSize();
       const placed = [];
+      const safe = labelArea(size);
       let count = 0;
       for (const [name, lat, lon, rank] of this._cities) {
         if (rank > maxRank) break; // list is sorted by rank
@@ -41,7 +44,7 @@ export function createCityLayer(L) {
         const major = rank <= Math.max(2, maxRank - 3);
         const w = name.length * (major ? 8.2 : 7.2) + 10, h = major ? 20 : 17;
         const box = [pt.x - w / 2, pt.y - h - 4, pt.x + w / 2, pt.y + 4];
-        if (box[2] < 0 || box[0] > size.x || box[3] < 0 || box[1] > size.y) continue;
+        if (box[0] < safe[0] || box[1] < safe[1] || box[2] > safe[2] || box[3] > safe[3]) continue;
         if (placed.some((q) => box[0] < q[2] && box[2] > q[0] && box[1] < q[3] && box[3] > q[1])) continue;
         placed.push(box);
         L.marker(ll, {
