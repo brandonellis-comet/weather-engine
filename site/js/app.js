@@ -6,7 +6,7 @@ import { createIsobarLayer, decodePressure, buildIsobars } from './isobars.js';
 import { createCityLayer } from './cities.js';
 import {
   ALERTS_API, CWFIS_WFS, LIST_PROPS, RISK, TYPE, PROVINCES, FUELS, FIRE_AGES, SATS, groupAlerts, isActive, inGeom, inPolys,
-  riskOf, typeOf, decodeFires, createFireLayer, summariseFires, stormCat, ktToKmh, buildTropicalLayer, buildAreaLayer, stormsAt,
+  riskOf, typeOf, nearPolys, polysOf, decodeFires, createFireLayer, summariseFires, stormCat, ktToKmh, buildTropicalLayer, buildAreaLayer, stormsAt,
 } from './hazards.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -415,10 +415,21 @@ async function loadAlertShapes(force = false) {
   })().finally(() => { A.shapesLoading = null; });
   return A.shapesLoading;
 }
+// Alerts: ECCC colour fill with a coloured edge on a dark casing, so each area reads
+// clearly over any weather layer. Statements: grey dashed outline, light fill.
 function alertStyle(f) {
   const st = typeOf(f.properties) === 'statement', r = RISK[riskOf(f.properties)];
-  return { color: r.line, weight: st ? 1.3 : 1.6, opacity: 0.95, dashArray: st ? '6 4' : null, fillColor: r.fill, fillOpacity: st ? 0.1 : 0.32, interactive: false };
+  return st
+    ? { color: '#3b4652', weight: 1.6, opacity: 0.95, dashArray: '6 4', fillColor: r.fill, fillOpacity: 0.12, interactive: false }
+    : { color: r.fill, weight: 2.2, opacity: 1, fillColor: r.fill, fillOpacity: 0.42, interactive: false };
 }
+const casingStyle = (f) => (typeOf(f.properties) === 'statement'
+  ? { stroke: false, fill: false, interactive: false }
+  : { color: '#0d1218', weight: 5, opacity: 0.85, fill: false, interactive: false });
+const alertGeo = (features, pane) => L.layerGroup([
+  L.geoJSON({ type: 'FeatureCollection', features }, { pane, style: casingStyle, interactive: false }),
+  L.geoJSON({ type: 'FeatureCollection', features }, { pane, style: alertStyle, interactive: false }),
+]);
 async function syncAlerts() {
   const A = S.hz.alerts;
   if (!S.overlays.has('alerts')) {
@@ -430,7 +441,7 @@ async function syncAlerts() {
   if (A.layer?._at !== A.shapesAt) {
     if (A.layer) map.removeLayer(A.layer);
     const feats = [...A.shapes].sort((a, b) => RISK[riskOf(a.properties)].rank - RISK[riskOf(b.properties)].rank);
-    A.layer = L.geoJSON({ type: 'FeatureCollection', features: feats }, { pane: 'alertPane', style: alertStyle, interactive: false });
+    A.layer = alertGeo(feats, 'alertPane');
     A.layer._at = A.shapesAt;
   }
   if (!map.hasLayer(A.layer)) A.layer.addTo(map);
@@ -451,7 +462,7 @@ function loadStatements() {
     for (const f of j.features || []) if (isActive(f.properties) && !A.stmt.has(f.id)) { A.stmt.set(f.id, f); added = true; }
     if (added || !A.stmtLayer || A.stmtLayer._at !== A.shapesAt) {
       if (A.stmtLayer) map.removeLayer(A.stmtLayer);
-      A.stmtLayer = L.geoJSON({ type: 'FeatureCollection', features: [...A.stmt.values()] }, { pane: 'stmtPane', style: alertStyle, interactive: false });
+      A.stmtLayer = alertGeo([...A.stmt.values()], 'stmtPane');
       A.stmtLayer._at = A.shapesAt;
     }
     if (S.overlays.has('alerts') && map.getZoom() >= 6 && !map.hasLayer(A.stmtLayer)) A.stmtLayer.addTo(map);
@@ -529,7 +540,7 @@ function hazardKeyHtml() {
   const rows = [];
   if (S.overlays.has('alerts')) rows.push(`<div class="key-row"><b>ECCC alerts</b>${['red', 'orange', 'yellow'].map((k) => `<span>${swatch(k)}${RISK[k].label}</span>`).join('')}<span><i class="sw dash"></i>Statement</span></div>`);
   if (S.overlays.has('fires')) rows.push(`<div class="key-row"><b>Fires</b>${FIRE_AGES.map((a) => `<span><i class="fd" style="background:${a.color}"></i>${a.label.replace('under ', '&lt;')}</span>`).join('')}<span><i class="sw area"></i>Fire area</span></div>`);
-  if (S.overlays.has('tropical') && (S.hz.trop.data?.storms || []).length) rows.push(`<div class="key-row"><b>Storms</b><span><i class="sw cone"></i>Forecast cone</span>${[30, 50, 70, 100, 140].map((kt) => { const c = stormCat(kt); return `<span><i class="fd" style="background:${c.color}"></i>${c.code === 'TD' ? 'D' : c.code === 'TS' ? 'S' : c.code}</span>`; }).join('')}</div>`);
+  if (S.overlays.has('tropical') && (S.hz.trop.data?.storms || []).length) rows.push(`<div class="key-row"><b>Storms</b><span><i class="sw cone"></i>Forecast cone</span>${[30, 50, 70, 90, 105, 120, 140].map((kt) => { const c = stormCat(kt); return `<span><i class="fd" style="background:${c.color}"></i>${c.code === 'TD' ? 'D' : c.code === 'TS' ? 'S' : c.code}</span>`; }).join('')}</div>`);
   return rows.length ? `<div class="hz-keys">${rows.join('')}</div>` : '';
 }
 function hazardChips() {
@@ -554,8 +565,7 @@ function alertItemHtml(g, i) {
   const r = RISK[g.risk], t = TYPE[g.type];
   const rk = g.type === 'statement' ? 'Statement' : `${r.label} ${t.label.toLowerCase()}`;
   return `<button type="button" class="hz-item" data-alert="${i}" style="--rk:${r.fill};--rl:${r.line}">
-    <span class="hz-bar"></span>
-    <span class="hz-main"><b>${esc(g.name)}</b><span class="hz-meta">${esc(rk)} · ${esc(provName(g.province))} · ${g.regions.length} area${g.regions.length === 1 ? '' : 's'}</span>
+    <span class="hz-main"><b>${esc(g.name)}</b><span class="hz-meta"><span class="rk-tag" style="background:${r.fill};color:${r.ink}">${esc(rk)}</span> ${esc(provName(g.province))} · ${g.regions.length} area${g.regions.length === 1 ? '' : 's'}</span>
     <span class="hz-meta">${g.expires ? `Expires ${esc(fmtWhen(g.expires))}` : `Issued ${esc(fmtWhen(g.issued))}`}</span></span></button>`;
 }
 function keyDetailsHtml() {
@@ -594,16 +604,17 @@ function renderHazards() {
     </section>
     <section>
       <div class="sec-h"><h3>Tropical storms</h3><span class="aside">${storms.length} active</span></div>
-      <div class="hz-list">${storms.length ? storms.map((s, i) => { const c = stormCat(s.kt); return `<button type="button" class="hz-item" data-storm="${i}" style="--rk:${c.color};--rl:#0d1218"><span class="hz-bar"></span><span class="hz-main"><b>${esc(s.label)} ${esc(s.name)}</b><span class="hz-meta">${esc(c.label)}${s.kt != null ? ` · ${ktToKmh(s.kt)} km/h (${s.kt} kt)` : ''}${s.mb ? ` · ${s.mb} hPa` : ''}</span><span class="hz-meta">${s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center'}${s.updated ? ` · ${esc(fmtWhen(s.updated))}` : ''}</span></span></button>`; }).join('') : '<p class="note">No active tropical cyclones in the Atlantic or eastern and central Pacific (NOAA NHC).</p>'}</div>
+      <div class="hz-list">${storms.length ? storms.map((s, i) => { const c = stormCat(s.kt); return `<button type="button" class="hz-item" data-storm="${i}" style="--rk:${c.color};--rl:#0d1218"><span class="hz-main"><b>${esc(s.label)} ${esc(s.name)}</b><span class="hz-meta">${esc(c.label)}${s.kt != null ? ` · ${ktToKmh(s.kt)} km/h (${s.kt} kt)` : ''}${s.mb ? ` · ${s.mb} hPa` : ''}</span><span class="hz-meta">${s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center'}${s.updated ? ` · ${esc(fmtWhen(s.updated))}` : ''}</span></span></button>`; }).join('') : '<p class="note">No active tropical cyclones in the Atlantic or eastern and central Pacific (NOAA NHC).</p>'}</div>
     </section>
     <section>
       <div class="sec-h"><h3>Wildfires</h3><span class="aside">${S.overlays.has('fires') ? '' : '<button type="button" class="linkish" data-show-fires>Show on map</button>'}</span></div>
       ${F.meta ? `<p class="hz-stat"><b>${F.meta.detections.toLocaleString('en-CA')}</b> satellite fire detections worldwide in the last 24 h${F.data ? `, <b>${inView.toLocaleString('en-CA')}</b> in the current view` : ''}.</p>` : '<p class="loading">Loading fire data…</p>'}
       ${S.hz.areas.data ? `<p class="hz-stat"><b>${areas.length}</b> active fire area${areas.length === 1 ? '' : 's'} in Canada (hotspots in the last 7 days).</p>
-        <div class="hz-list">${areas.slice(0, 8).map((a, i) => `<button type="button" class="hz-item" data-area="${i}" style="--rk:#ff6a2b;--rl:#c2410c"><span class="hz-bar"></span><span class="hz-main"><b>About ${a.ha != null ? a.ha.toLocaleString('en-CA') : '?'} ha</b><span class="hz-meta">Last hotspot ${esc(fmtDay(a.last))} · first ${esc(fmtDay(a.first))}</span></span></button>`).join('')}</div>` : ''}
+        <div class="hz-list">${areas.slice(0, 8).map((a, i) => `<button type="button" class="hz-item" data-area="${i}" style="--rk:#ff6a2b;--rl:#c2410c"><span class="hz-main"><b>About ${a.ha != null ? a.ha.toLocaleString('en-CA') : '?'} ha</b><span class="hz-meta">Last hotspot ${esc(fmtDay(a.last))} · first ${esc(fmtDay(a.first))}</span></span></button>`).join('')}</div>` : ''}
       <p class="note">Detections: NASA FIRMS (VIIRS, 375 m). Fire areas: Canadian Wildland Fire Information System (Natural Resources Canada), estimated from satellite hotspots. Not official fire perimeters.</p>
     </section>`;
 }
+const fmtShort = (iso) => new Intl.DateTimeFormat('en-CA', { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short' }).format(Date.parse(iso));
 const fmtDay = (iso) => (iso ? new Intl.DateTimeFormat('en-CA', { day: 'numeric', month: 'short' }).format(Date.parse(iso)) : '—');
 
 function onDrawerClick(e) {
@@ -616,7 +627,7 @@ function onDrawerClick(e) {
     const area = S.hz.areas.data?.areas?.[Number(ar.dataset.area)];
     if (area) {
       if (!S.overlays.has('fires')) toggleOverlay('fires');
-      map.fitBounds(L.latLngBounds(area.polys.flatMap((p) => p[0].map(([x, y]) => [y, x]))), { maxZoom: 10, padding: [40, 40] });
+      map.fitBounds(L.latLngBounds(area.polys.flatMap((p) => p[0].map(([x, y]) => [y, x]))), { maxZoom: 10, ...fitPad() });
     }
     return;
   }
@@ -663,11 +674,16 @@ async function openAlert(g, fromList) {
   if (S.drawer !== 'alert' || $('#drawerTitle').textContent !== g.name) return;
   const feats = res.filter((x) => x.status === 'fulfilled' && x.value?.geometry).map((x) => x.value);
   const b = highlight(feats);
-  if (b?.isValid()) map.fitBounds(b, { maxZoom: 9, padding: [30, 30], paddingBottomRight: matchMedia('(max-width: 760px)').matches ? [20, 20] : [460, 20] });
+  if (b?.isValid()) map.fitBounds(b, { maxZoom: 9, ...fitPad() });
   const text = feats.find((f) => f.properties?.alert_text_en)?.properties.alert_text_en || g.text;
   const sec = $('#alertText');
   if (sec) sec.innerHTML = text ? alertTextHtml(text) : '<p class="err">The alert text did not load. Use the weather.gc.ca link below.</p>';
 }
+// Keep fitted areas clear of the top bar, the time bar and (on wide screens) the drawer.
+const fitPad = () => {
+  const phone = matchMedia('(max-width: 760px)').matches, tb = ($('#timebar')?.offsetHeight || 100) + 24;
+  return { paddingTopLeft: [phone ? 20 : 30, 70], paddingBottomRight: [phone ? 20 : 470, tb] };
+};
 const cap1 = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
 
 function stormHtml(s, compact) {
@@ -684,7 +700,7 @@ function stormHtml(s, compact) {
       ${s.updated ? `<dt>Updated</dt><dd>${esc(fmtWhen(s.updated))}</dd>` : ''}
       <dt>Forecast</dt><dd>${s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center'}</dd>
     </dl>
-    ${!compact && pts.length ? `<table class="fc tc"><thead><tr><th>Forecast</th><th>Strength</th><th>Wind</th></tr></thead><tbody>${pts.map((p) => { const pc = stormCat(p.kt); return `<tr><td>${esc(p.when || (p.tau != null ? `+${p.tau} h` : ''))}</td><td><i class="fd" style="background:${pc.color}"></i>${esc(pc.label)}</td><td>${p.kt != null ? `${ktToKmh(p.kt)} km/h` : '–'}</td></tr>`; }).join('')}</tbody></table>` : ''}
+    ${!compact && pts.length ? `<table class="fc tc"><thead><tr><th>Forecast</th><th>Strength</th><th>Wind</th></tr></thead><tbody>${pts.map((p) => { const pc = stormCat(p.kt); return `<tr><td>${esc(p.valid ? fmtShort(p.valid) : p.when || (p.tau != null ? `+${p.tau} h` : ''))}</td><td><i class="fd" style="background:${pc.color}"></i>${esc(pc.label)}</td><td>${p.kt != null ? `${ktToKmh(p.kt)} km/h` : '–'}</td></tr>`; }).join('')}</tbody></table>` : ''}
     <p class="note">The cone shows where the centre will probably track. Wind, rain and surge often reach well outside it.${s.advisory ? ` <a href="${esc(s.advisory)}" target="_blank" rel="noopener">Official NHC advisory</a>.` : ''} For storms threatening Canada: <a href="https://weather.gc.ca/hurricane/index_e.html" target="_blank" rel="noopener">Canadian Hurricane Centre</a>.</p>
   </article>`;
 }
@@ -697,7 +713,7 @@ function openStorm(i) {
   openDrawer(`${s.label} ${s.name}`, s.forecastSource === 'CHC' ? 'ECCC Canadian Hurricane Centre' : 'NOAA National Hurricane Center');
   $('#drawerBody').innerHTML = `<button type="button" class="linkish back" data-back>← All hazards</button>${stormHtml(s, false)}`;
   const ll = [[s.lat, s.lon], ...(s.points || []).map((p) => [p.lat, p.lon]), ...(s.cone || []).flatMap((poly) => poly[0].map(([x, y]) => [y, x]))].filter(([a, b]) => a != null && b != null);
-  if (ll.length) map.fitBounds(L.latLngBounds(ll), { maxZoom: 7, padding: [30, 30], paddingBottomRight: matchMedia('(max-width: 760px)').matches ? [20, 20] : [460, 20] });
+  if (ll.length) map.fitBounds(L.latLngBounds(ll), { maxZoom: 7, ...fitPad() });
 }
 
 // Hazards at a tapped point: alerts (live), storms and fires (published data),
@@ -718,10 +734,11 @@ async function renderPointHazards(lat, lon, pt) {
   draw();
   const jobs = [];
   if (S.overlays.has('alerts')) jobs.push((async () => {
-    const e = 0.0005;
+    const tol = (10 * metresPerPx()) / 111320; // about 10 screen pixels, in degrees
+    const ex = tol / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
     try {
-      const j = await getJson(`${ALERTS_API}?f=json&limit=50&bbox=${lon - e},${lat - e},${lon + e},${lat + e}`);
-      const feats = (j.features || []).filter((f) => isActive(f.properties) && inGeom(f.geometry, lon, lat));
+      const j = await getJson(`${ALERTS_API}?f=json&limit=50&bbox=${(lon - ex).toFixed(4)},${(lat - tol).toFixed(4)},${(lon + ex).toFixed(4)},${(lat + tol).toFixed(4)}`);
+      const feats = (j.features || []).filter((f) => isActive(f.properties) && (inGeom(f.geometry, lon, lat) || nearPolys(polysOf(f.geometry), lon, lat, tol)));
       if (!same()) return;
       highlight(feats);
       S.pointGroups = groupAlerts(feats);

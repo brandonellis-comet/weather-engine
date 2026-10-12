@@ -23,12 +23,13 @@ const views = [
   { name: 'iphone-z7', engine: 'webkit', device: iphone, main: 'wind', center: [44.9, -63.5], zoom: 7, wait: 20000 },
   { name: 'iphone-layers', engine: 'webkit', device: iphone, main: 'temp', center: [44.8, -63.4], zoom: 6, click: '#railToggle' },
   { name: 'iphone-alerts-map', engine: 'webkit', device: iphone, main: 'temp', center: [47, -66], zoom: 5, overlays: HZ },
+  { name: 'iphone-alerts-z7', engine: 'webkit', device: iphone, main: 'temp', center: [46.3, -66.2], zoom: 7, overlays: HZ, wait: 10000 },
   { name: 'iphone-hazards', engine: 'webkit', device: iphone, main: 'temp', center: [47, -66], zoom: 5, overlays: HZ, click: '#hazardBtn', after: 4000 },
   { name: 'iphone-alert-detail', engine: 'webkit', device: iphone, main: 'temp', center: [47, -66], zoom: 5, overlays: HZ,
     run: async (page) => { await page.evaluate(() => document.querySelector('#hazardBtn').click()); await page.waitForTimeout(4000); await page.evaluate(() => document.querySelector('[data-alert]')?.click()); await page.waitForTimeout(5000); } },
   { name: 'iphone-alert-tap', engine: 'webkit', device: iphone, main: 'temp', center: [47, -66], zoom: 5, overlays: HZ,
     run: async (page) => {
-      const ll = await page.evaluate(() => { const f = window.__we?.S.hz.alerts.shapes?.find((x) => x.geometry); if (!f) return null; const g = f.geometry; const ring = g.type === 'Polygon' ? g.coordinates[0] : g.coordinates[0][0]; let x = 0, y = 0; for (const p of ring) { x += p[0]; y += p[1]; } return [y / ring.length, x / ring.length]; });
+      const ll = await page.evaluate(() => { const sh = window.__we?.S.hz.alerts.shapes || []; const f = sh.find((x) => /frost|rain|wind|snow/i.test(x.properties.alert_name_en || '') && x.geometry) || sh.find((x) => x.geometry); if (!f) return null; const g = f.geometry; const ring = g.type === 'Polygon' ? g.coordinates[0] : g.coordinates[0][0]; let x = 0, y = 0; for (const p of ring) { x += p[0]; y += p[1]; } return [y / ring.length, x / ring.length]; });
       log.push(`[iphone-alert-tap] point ${JSON.stringify(ll)}`);
       if (ll) { await page.evaluate((p) => { window.__we.map.setView(p, 7); window.__we.openPoint(L.latLng(p[0], p[1])); }, ll); await page.waitForTimeout(6000); }
     } },

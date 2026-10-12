@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeFires, encodeFires, simplifyLine, simplifyRing, compactAreas, compactStorm, compactPoints, FIRE_GRID } from '../scripts/hazards.mjs';
-import { decodeFires, fireLat, fireLon, fireAgeMin, fireBucket, summariseFires, groupAlerts, isActive, inPolys, inGeom, stormCat, stormsAt, riskOf, typeOf } from '../site/js/hazards.js';
+import { mergeFires, encodeFires, simplifyLine, simplifyRing, compactAreas, compactStorm, compactPoints, parseNhcTime, FIRE_GRID } from '../scripts/hazards.mjs';
+import { decodeFires, fireLat, fireLon, fireAgeMin, fireBucket, summariseFires, groupAlerts, isActive, inPolys, inGeom, nearPolys, stormCat, stormsAt, riskOf, typeOf } from '../site/js/hazards.js';
 
 const NOW = Date.parse('2026-10-12T18:00:00Z');
 const HEAD = 'latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,confidence,version,bright_ti5,frp,daynight';
@@ -133,4 +133,19 @@ test('alerts: point in polygon with holes and multipolygons', () => {
   const multi = { type: 'MultiPolygon', coordinates: [[outer], [[[20, 20], [30, 20], [30, 30], [20, 20]]]] };
   assert.equal(inGeom(multi, 28, 22), true);
   assert.equal(inGeom(null, 1, 1), false);
+});
+
+test('tropical: NHC local time labels to UTC', () => {
+  assert.equal(parseNhcTime('2026-10-12 5:00 PM Mon MST'), '2026-10-13T00:00:00.000Z');
+  assert.equal(parseNhcTime('2026-10-13 12:00 AM Tue AST'), '2026-10-13T04:00:00.000Z');
+  assert.equal(parseNhcTime('2026-09-01 11:00 AM Tue EDT'), '2026-09-01T15:00:00.000Z');
+  assert.equal(parseNhcTime('5:00 PM Mon MST'), null);
+  assert.equal(parseNhcTime('2026-10-12 5:00 PM Mon XYZ'), null);
+});
+
+test('alerts: near an edge counts as a hit', () => {
+  const polys = [[[[0, 0], [1, 0], [1, 0.01], [0, 0.01], [0, 0]]]]; // thin coastal strip
+  assert.equal(nearPolys(polys, 0.5, 0.005, 0.001), true);
+  assert.equal(nearPolys(polys, 0.5, 0.02, 0.015), true);
+  assert.equal(nearPolys(polys, 0.5, 0.05, 0.015), false);
 });

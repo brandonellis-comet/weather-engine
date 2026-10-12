@@ -159,6 +159,16 @@ export function compactStorm(s) {
     graphics: s.forecastGraphics?.url || null,
   };
 }
+// NHC labels times in the storm's local zone, e.g. "2026-10-12 5:00 PM Mon MST".
+const TZ = { UTC: 0, GMT: 0, AST: -4, ADT: -3, EST: -5, EDT: -4, CST: -6, CDT: -5, MST: -7, MDT: -6, PST: -8, PDT: -7, AKST: -9, AKDT: -8, HST: -10, CHST: 10 };
+export function parseNhcTime(label) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s+\w{3}\s+([A-Za-z]{2,5})$/.exec(String(label || '').trim());
+  if (!m || TZ[m[7].toUpperCase()] == null) return null;
+  let h = Number(m[4]) % 12;
+  if (m[6] === 'PM') h += 12;
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), h, Number(m[5])) - TZ[m[7].toUpperCase()] * 3600e3;
+  return new Date(t).toISOString();
+}
 export function compactPoints(geojson) {
   return (geojson?.features || []).map((f) => {
     const p = f.properties || {};
@@ -168,7 +178,7 @@ export function compactPoints(geojson) {
       tau: num(pick(p, ['tau', 'fcstprd'])),
       kt: num(pick(p, ['maxwind', 'intensity'])), gust: num(pick(p, ['gust'])), mb: num(pick(p, ['mslp'])),
       cls: pick(p, ['dvlbl', 'tcdvlp', 'stormtype']),
-      when: pick(p, ['fldatelbl', 'datelbl', 'advdate']), valid: pick(p, ['validtime']),
+      when: pick(p, ['datelbl', 'fldatelbl', 'advdate']), valid: parseNhcTime(pick(p, ['fldatelbl'])),
     };
   }).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)).sort((a, b) => (a.tau ?? 0) - (b.tau ?? 0));
 }

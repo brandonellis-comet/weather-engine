@@ -78,6 +78,21 @@ export function inPolys(polys, lon, lat) {
   }
   return false;
 }
+// Inside, or within `tol` degrees (longitude scaled to ground distance) of an edge:
+// thin coastal alert areas are hard to hit exactly on a phone.
+export function nearPolys(polys, lon, lat, tol) {
+  if (inPolys(polys, lon, lat)) return true;
+  const k = Math.cos((lat * Math.PI) / 180);
+  for (const poly of polys || []) for (const ring of poly) {
+    for (let i = 1; i < ring.length; i++) {
+      const ax = (ring[i - 1][0] - lon) * k, ay = ring[i - 1][1] - lat, bx = (ring[i][0] - lon) * k, by = ring[i][1] - lat;
+      const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+      const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len)) : 0;
+      if (Math.hypot(ax + t * dx, ay + t * dy) <= tol) return true;
+    }
+  }
+  return false;
+}
 export function polysOf(geom) {
   if (!geom) return [];
   if (geom.type === 'Polygon') return [geom.coordinates];

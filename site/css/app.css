@@ -315,11 +315,11 @@ table.fc tr.day td { border-top: 1px solid var(--faint); }
 
 .hz-list { display: flex; flex-direction: column; gap: 6px; }
 .hz-item {
-  display: grid; grid-template-columns: 6px minmax(0, 1fr); width: 100%; padding: 0; text-align: left; cursor: pointer; overflow: hidden;
-  background: rgb(255 255 255 / .03); border: 1px solid var(--line); border-radius: 8px;
+  display: block; width: 100%; padding: 0; text-align: left; cursor: pointer;
+  background: rgb(255 255 255 / .03); border: 1px solid var(--line); border-left: 6px solid var(--rk); border-radius: 8px;
 }
 .hz-item:hover { border-color: var(--faint); background: rgb(255 255 255 / .06); }
-.hz-bar { background: var(--rk); box-shadow: inset -1px 0 0 var(--rl); }
+.rk-tag { display: inline-block; padding: 0 6px; margin-right: 3px; border-radius: 4px; font: 700 11px/1.6 var(--f-body); letter-spacing: .03em; text-transform: uppercase; vertical-align: 1px; }
 .hz-main { display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; min-width: 0; }
 .hz-main b { font-weight: 600; font-size: 14.5px; }
 .hz-meta { font-size: 12.5px; color: var(--muted); margin: 0; }
